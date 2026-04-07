@@ -592,6 +592,7 @@ WHERE
   AND (game.dwd_cloudgame_game_vminfo_v2_inc.project_id <> '354' OR game.dwd_cloudgame_game_vminfo_v2_inc.project_id IS NULL)
   AND (game.dwd_cloudgame_game_vminfo_v2_inc.project_id <> '387' OR game.dwd_cloudgame_game_vminfo_v2_inc.project_id IS NULL)
   AND game.dwd_cloudgame_game_vminfo_v2_inc.arch = 'X86'
+  AND game.dwd_cloudgame_game_vminfo_v2_inc.resources_purpose = '订单资源'
   AND game.dwd_cloudgame_game_vminfo_v2_inc.dt >= toDate(now())
   AND game.dwd_cloudgame_game_vminfo_v2_inc.dt < toDate((CAST(now() AS timestamp) + INTERVAL 1 day))
   AND game.dwd_cloudgame_game_vminfo_v2_inc.fmt_ts >= toStartOfMinute(toDateTime((CAST(now() AS timestamp) + INTERVAL -1 minute)))
@@ -631,8 +632,8 @@ FROM
     AND dt < toDate(cast(now() as timestamp) + interval 1 day)
     AND project_id NOT IN ('70','381','10124','31180','369','379','402','404','18','32','372','354','387')
     AND arch = 'X86'
+    AND resources_purpose = '订单资源'
     AND toHour(fmt_ts) >= 12
-    AND toHour(fmt_ts) < 20
 
   GROUP BY dt, project_id, toStartOfMinute(fmt_ts)
 ) t
@@ -698,55 +699,40 @@ ORDER BY
     dt DESC,
     project_id`;
 
-// 原力环境供应：biz_type 与订单项目 ID 对齐；biz_name 作展示名称；Metabase database 默认 2
+// 原力环境供应：按 dt + biz_name + biz_type 的分钟计数，计算每日 max/avg（仅 12 点后）
 const YUANLI_SUPPLY_7D_SQL = `SELECT
-    daily.date AS \`日期\`,
-    daily.biz_type AS \`业务类型\`,
-    daily.biz_name AS \`业务名称\`,
-    minute_stats.max_total AS \`总数最大值\`,
-    minute_stats.avg_total AS \`总数平均值\`
+    dt AS \`日期\`,
+    biz_name AS \`业务名称\`,
+    biz_type AS \`业务类型\`,
+    max(total_minute) AS \`总数最大值\`,
+    avg(total_minute) AS \`总数平均值\`
 FROM
 (
-    SELECT DISTINCT
-        toDate(fmt_ts) AS date,
+    SELECT
+        dt,
+        biz_name,
         biz_type,
-        biz_name
+        toStartOfMinute(fmt_ts) AS minute_ts,
+        count() AS total_minute
     FROM game.dwd_cloudgame_game_vminfo_inc
     WHERE
-        dt >= toDate(now() - toIntervalDay(7))
-        AND dt < toDate(now() + toIntervalDay(1))
+        dt >= today() - 7
+        AND dt < today() + 1
         AND fmt_ts >= now() - toIntervalDay(7)
-        AND fmt_ts < now() + toIntervalDay(1)
-        AND toHour(toDateTime(fmt_ts)) >= 12
-) AS daily
-INNER JOIN
-(
-    SELECT
-        biz_type,
+        AND toHour(fmt_ts) >= 12
+    GROUP BY
+        dt,
         biz_name,
-        max(total_minute) AS max_total,
-        avg(total_minute) AS avg_total
-    FROM
-    (
-        SELECT
-            toStartOfMinute(toDateTime(fmt_ts)) AS ts_min,
-            biz_type,
-            biz_name,
-            count(*) AS total_minute
-        FROM game.dwd_cloudgame_game_vminfo_inc
-        WHERE
-            dt >= toDate(now() - toIntervalDay(7))
-            AND dt < toDate(now() + toIntervalDay(1))
-            AND fmt_ts >= now() - toIntervalDay(7)
-            AND fmt_ts < now() + toIntervalDay(1)
-            AND toHour(toDateTime(fmt_ts)) >= 12
-        GROUP BY ts_min, biz_type, biz_name
-    ) AS minute_data
-    GROUP BY biz_type, biz_name
-) AS minute_stats
-ON daily.biz_type = minute_stats.biz_type
-AND daily.biz_name = minute_stats.biz_name
-ORDER BY daily.date ASC, daily.biz_type ASC, daily.biz_name ASC`;
+        biz_type,
+        minute_ts
+)
+GROUP BY
+    dt,
+    biz_name,
+    biz_type
+ORDER BY
+    dt,
+    biz_name;`;
 
 // --- Metabase：供应看板订单（结算套餐 -> 项目 聚合所需原始数据）---
 // dataset 返回列：
@@ -969,7 +955,7 @@ const FilterBar = ({ projects, selectedProjectIds, setSelectedProjectIds, loadin
 // 1. 供应看板 (Supply Dashboard)
 const SupplyView = ({
   projectsToShow,
-  loading = false,
+  supplyFetchPending = false,
   supplyEnv,
   setSupplyEnv,
   useApi: useApiProp = false,
@@ -981,7 +967,7 @@ const SupplyView = ({
   const list =
     Array.isArray(projectsToShow) && projectsToShow.length > 0
       ? projectsToShow
-      : supplyEnv === SUPPLY_ENV_YUANLI
+      : supplyEnv === SUPPLY_ENV_YUANLI || useApiProp
         ? []
         : projects;
   const totalSupply = list.reduce((sum, p) => sum + (typeof p.supply === 'number' ? p.supply : 0), 0);
@@ -1028,10 +1014,10 @@ const SupplyView = ({
         </button>
       </div>
 
-      {useApiProp && loading && (
+      {useApiProp && supplyFetchPending && (
         <div className="flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-slate-600">
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-600" aria-hidden />
-          <span>正在加载订单与供应数据…</span>
+          <span>近 7 天 Metabase 取数中，订单会先出、供应峰值与曲线随后补齐。</span>
         </div>
       )}
 
@@ -1048,7 +1034,7 @@ const SupplyView = ({
       {useApiProp &&
         supplyEnv === SUPPLY_ENV_YUANLI &&
         yuanliMetabaseConfigured &&
-        !loading &&
+        !supplyFetchPending &&
         Array.isArray(projectsToShow) &&
         projectsToShow.length === 0 && (
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 leading-relaxed">
@@ -1084,74 +1070,63 @@ const SupplyView = ({
       <Card className="p-6">
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
           <div>
-            <h2 className="text-sm font-medium text-slate-500 mb-2 flex items-center gap-2">
-              <Layers className="w-4 h-4" /> 供应监控冗余
+            <h2 className="text-sm font-medium text-slate-500 mb-2 flex flex-wrap items-center gap-2">
+              <Layers className="w-4 h-4 shrink-0" />
+              <span>供应监控冗余</span>
+              {useApiProp && supplyFetchPending ? (
+                <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold text-blue-700">
+                  <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                  近7天
+                </span>
+              ) : null}
             </h2>
-            <div className="flex items-baseline gap-4">
-              {loading ? (
-                <div className="flex flex-col gap-2 py-1">
-                  <div className="h-12 w-36 bg-slate-200 rounded-lg animate-pulse" />
-                  <div className="h-6 w-48 bg-slate-100 rounded animate-pulse" />
-                </div>
-              ) : (
-                <>
-                  <span className="text-5xl font-bold text-slate-900 tracking-tight">
-                    {redundancyRatio.toFixed(1)}
-                    <span className="text-3xl">%</span>
-                  </span>
-                  <TrendBadge
-                    value={`合计 峰值 ${totalSupply} / 订单 ${totalOrders}`}
-                    isPositive={!overviewRedundancyAlert}
-                  />
-                </>
-              )}
+            <div className="flex items-baseline gap-4 flex-wrap">
+              <span className="text-5xl font-bold text-slate-900 tracking-tight">
+                {redundancyRatio.toFixed(1)}
+                <span className="text-3xl">%</span>
+              </span>
+              <TrendBadge
+                value={`合计 峰值 ${totalSupply} / 订单 ${totalOrders}`}
+                isPositive={!overviewRedundancyAlert}
+              />
             </div>
           </div>
 
           <div className="flex gap-4 p-4 bg-slate-50 rounded-xl border border-slate-100 min-w-[300px]">
-            {loading ? (
-              <>
-                <div className="flex-1 space-y-2">
-                  <div className="h-3 w-28 bg-slate-200 rounded animate-pulse" />
-                  <div className="h-7 w-20 bg-slate-200 rounded animate-pulse" />
-                </div>
-                <div className="w-px bg-slate-200" />
-                <div className="flex-1 space-y-2">
-                  <div className="h-3 w-24 bg-slate-200 rounded animate-pulse" />
-                  <div className="h-7 w-16 bg-slate-200 rounded animate-pulse" />
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="flex-1">
-                  <p className="text-xs text-slate-400 mb-1">供应峰值（各卡最近一日）</p>
-                  <p className="text-xl font-semibold text-slate-700">{totalSupply.toLocaleString()}</p>
-                </div>
-                <div className="w-px bg-slate-200" />
-                <div className="flex-1">
-                  <p className="text-xs text-slate-400 mb-1">订单（同上日）</p>
-                  <p className="text-xl font-semibold text-slate-700">{totalOrders.toLocaleString()}</p>
-                </div>
-              </>
-            )}
+            <div className="flex-1">
+              <p className="text-xs text-slate-400 mb-1 flex items-center gap-1.5">
+                供应峰值（各卡最近一日）
+                {useApiProp && supplyFetchPending ? (
+                  <Loader2 className="h-3 w-3 animate-spin text-blue-500" aria-hidden />
+                ) : null}
+              </p>
+              <p className="text-xl font-semibold text-slate-700">{totalSupply.toLocaleString()}</p>
+            </div>
+            <div className="w-px bg-slate-200" />
+            <div className="flex-1">
+              <p className="text-xs text-slate-400 mb-1">订单（同上日）</p>
+              <p className="text-xl font-semibold text-slate-700">{totalOrders.toLocaleString()}</p>
+            </div>
           </div>
         </div>
       </Card>
 
       {/* 项目栅格：保证 100% 缩放下也尽量看得到 3 列 */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-        {loading
-          ? Array.from({ length: 6 }).map((_, idx) => (
-              <Card key={`supply-loading-${idx}`} className="p-4 border border-slate-200 animate-pulse">
-                <div className="h-4 w-32 bg-slate-200 rounded mb-3" />
-                <div className="h-3 w-44 bg-slate-100 rounded mb-4" />
-                <div className="h-6 w-56 bg-slate-200 rounded mb-4" />
-                <div className="h-24 w-full bg-slate-100 rounded mb-4" />
-                <div className="h-3 w-20 bg-slate-200 rounded" />
-              </Card>
-            ))
-          : list.map((proj) => {
+        {list.length === 0 && supplyFetchPending ? (
+          <Card className="col-span-full border border-dashed border-slate-200 bg-slate-50/80 py-16">
+            <div className="flex flex-col items-center justify-center gap-3 text-slate-600">
+              <Loader2 className="h-10 w-10 animate-spin text-blue-600" aria-hidden />
+              <p className="text-sm font-medium">正在拉取近 7 天订单与供应…</p>
+              <p className="text-xs text-slate-500">先出订单与卡片框架，CH/vmid 返回后自动刷新峰值与曲线。</p>
+            </div>
+          </Card>
+        ) : null}
+        {list.map((proj) => {
           const hasSupplyNum = typeof proj.supply === 'number' && Number.isFinite(proj.supply);
+          const vmidStillLoading = useApiProp && supplyFetchPending && !hasSupplyNum;
+          const chartAwaitingSeries =
+            vmidStillLoading && (!Array.isArray(proj.trend) || proj.trend.length === 0);
           const marginPct =
             hasSupplyNum && typeof proj.order === 'number' && proj.order > 0
               ? ((proj.supply - proj.order) / proj.order) * 100
@@ -1201,8 +1176,17 @@ const SupplyView = ({
               {proj.supplyHeadlineDate ? (
                 <span className="text-slate-400 tabular-nums">{proj.supplyHeadlineDate}</span>
               ) : null}
-              <strong className="text-slate-900 text-lg tabular-nums">
-                {hasSupplyNum ? proj.supply : '—'}
+              <strong className="text-slate-900 text-lg tabular-nums inline-flex items-center gap-1.5">
+                {hasSupplyNum ? (
+                  proj.supply
+                ) : vmidStillLoading ? (
+                  <>
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-500" aria-hidden />
+                    <span className="text-slate-400 font-semibold">—</span>
+                  </>
+                ) : (
+                  '—'
+                )}
               </strong>
               <span className="text-slate-300">|</span>
               <span className="text-slate-500">订单</span>
@@ -1211,43 +1195,55 @@ const SupplyView = ({
 
             <div className="h-28 w-full mb-4">
               <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>近7天冗余率 (%)</span>
+                <span className="inline-flex items-center gap-1">
+                  近7天冗余率 (%)
+                  {useApiProp && supplyFetchPending ? (
+                    <Loader2 className="h-3 w-3 animate-spin text-blue-400" aria-hidden />
+                  ) : null}
+                </span>
               </div>
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={proj.trend}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis
-                    dataKey="time"
-                    tick={{ fontSize: 10, fill: '#94a3b8' }}
-                    axisLine={false}
-                    tickLine={false}
-                    dy={8}
-                    minTickGap={18}
-                    interval="preserveStartEnd"
-                  />
-                  <YAxis
-                    tick={{ fontSize: 10, fill: '#94a3b8' }}
-                    axisLine={false}
-                    tickLine={false}
-                    dx={-10}
-                    width={44}
-                    tickFormatter={(v) => `${v.toFixed(0)}%`}
-                  />
-                  <Tooltip
-                    contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                    labelStyle={{ color: '#64748b', marginBottom: '4px' }}
-                    formatter={(value) => [`${Number(value).toFixed(1)}%`, '冗余率']}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="value"
-                    stroke="#0ea5e9"
-                    strokeWidth={2}
-                    dot={false}
-                    isAnimationActive={false}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+              {chartAwaitingSeries ? (
+                <div className="flex h-full min-h-[7rem] flex-col items-center justify-center gap-2 rounded-lg border border-slate-100 bg-slate-50/90 text-[11px] text-slate-500">
+                  <Loader2 className="h-7 w-7 animate-spin text-blue-500" aria-hidden />
+                  <span>曲线随供应数据返回后显示</span>
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={proj.trend}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <XAxis
+                      dataKey="time"
+                      tick={{ fontSize: 10, fill: '#94a3b8' }}
+                      axisLine={false}
+                      tickLine={false}
+                      dy={8}
+                      minTickGap={18}
+                      interval="preserveStartEnd"
+                    />
+                    <YAxis
+                      tick={{ fontSize: 10, fill: '#94a3b8' }}
+                      axisLine={false}
+                      tickLine={false}
+                      dx={-10}
+                      width={44}
+                      tickFormatter={(v) => `${v.toFixed(0)}%`}
+                    />
+                    <Tooltip
+                      contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                      labelStyle={{ color: '#64748b', marginBottom: '4px' }}
+                      formatter={(value) => [`${Number(value).toFixed(1)}%`, '冗余率']}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="value"
+                      stroke="#0ea5e9"
+                      strokeWidth={2}
+                      dot={false}
+                      isAnimationActive={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
             </div>
 
             <div className="flex items-center gap-3 text-xs mb-3 flex-wrap">
@@ -1806,8 +1802,7 @@ export default function App() {
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [instanceByProjectId, setInstanceByProjectId] = useState({});
   const [instanceProjectOptions, setInstanceProjectOptions] = useState([]);
-  const [supplyProjects, setSupplyProjects] = useState(projects);
-  const [supplyLoading, setSupplyLoading] = useState(useApi);
+  const [supplyProjects, setSupplyProjects] = useState(() => (useApi ? [] : projects));
   const [bytedanceSupplyByDate, setBytedanceSupplyByDate] = useState({});
   const [supplyVmidByProjectId, setSupplyVmidByProjectId] = useState(() => (useApi ? undefined : {}));
   const [supplyYuanliByProjectId, setSupplyYuanliByProjectId] = useState(() => (useApi ? undefined : {}));
@@ -1817,11 +1812,26 @@ export default function App() {
   const [instanceLoading, setInstanceLoading] = useState(() => useApi);
 
   useEffect(() => {
-    if (!useApi) {
-      setSupplyLoading(false);
-      setInstanceLoading(false);
-    }
+    if (!useApi) setInstanceLoading(false);
   }, []);
+
+  /** 近 7 天订单/供应仍有一路未返回（用于界面内小 loading，不再整页骨架卡死） */
+  const supplyFetchPending = useMemo(() => {
+    if (!useApi) return false;
+    if (supplyEnv === SUPPLY_ENV_YUANLI) {
+      return (
+        ordersByProjectDateYuanli === undefined || supplyYuanliByProjectId === undefined
+      );
+    }
+    return ordersByProjectDatePaas === undefined || supplyVmidByProjectId === undefined;
+  }, [
+    useApi,
+    supplyEnv,
+    ordersByProjectDateYuanli,
+    supplyYuanliByProjectId,
+    ordersByProjectDatePaas,
+    supplyVmidByProjectId,
+  ]);
 
   useEffect(() => {
     if (!useApi) return;
@@ -2131,24 +2141,22 @@ export default function App() {
     };
   }, []);
 
-  // 供应看板：按环境与数据源合并卡片
+  // 供应看板：按环境与数据源合并卡片（订单就绪即可先出卡；vmid/原力 CH 未到则用空 map，供应数字与曲线稍后补齐）
   useEffect(() => {
     if (!useApi) return;
     const isYl = supplyEnv === SUPPLY_ENV_YUANLI;
     if (isYl) {
-      if (supplyYuanliByProjectId === undefined || ordersByProjectDateYuanli === undefined) {
-        setSupplyLoading(true);
-        setSupplyProjects([]);
-        return;
-      }
-    } else if (supplyVmidByProjectId === undefined || ordersByProjectDatePaas === undefined) {
+      if (ordersByProjectDateYuanli === undefined) return;
+    } else if (ordersByProjectDatePaas === undefined) {
       return;
     }
 
     const byProject = instanceByProjectId || {};
     const instanceForSupply = isYl ? {} : byProject;
     const byteMap = isYl ? {} : bytedanceSupplyByDate || {};
-    const vmidMap = isYl ? supplyYuanliByProjectId || {} : supplyVmidByProjectId || {};
+    const vmidMap = isYl
+      ? supplyYuanliByProjectId ?? {}
+      : supplyVmidByProjectId ?? {};
     const hasInstance = !isYl && Object.keys(byProject).length > 0;
     const hasByte = !isYl && Object.keys(byteMap).length > 0;
     const hasSupply = Object.keys(vmidMap).length > 0;
@@ -2280,7 +2288,6 @@ export default function App() {
 
       return cards;
     });
-    setSupplyLoading(false);
   }, [
     supplyEnv,
     instanceByProjectId,
@@ -2403,7 +2410,7 @@ export default function App() {
           projects={filterBarProjects}
           selectedProjectIds={selectedProjectIds}
           setSelectedProjectIds={setSelectedProjectIds}
-          loading={useApi && activeTab === 'supply' && supplyLoading}
+          loading={useApi && activeTab === 'supply' && supplyFetchPending}
         />
 
         <div className="mt-4">
@@ -2411,7 +2418,7 @@ export default function App() {
             <div role="tabpanel" id="tabpanel-supply" aria-hidden={activeTab !== 'supply'} hidden={activeTab !== 'supply'}>
               <SupplyView
                 projectsToShow={supplyProjectsToShow}
-                loading={supplyLoading}
+                supplyFetchPending={supplyFetchPending}
                 supplyEnv={supplyEnv}
                 setSupplyEnv={setSupplyEnv}
                 useApi={useApi}
