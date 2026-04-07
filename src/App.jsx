@@ -25,7 +25,13 @@ import {
   Zap,
 } from 'lucide-react';
 
-import { aggregateOrdersDatasetByProjectDate, normalizeDateKey } from './supply/settlementToProject.js';
+import {
+  aggregateOrdersDatasetByProjectDate,
+  getProjectIdToSettlementIds,
+  normalizeDateKey,
+  projectIdsForSupplyCardId,
+  supplyCardIdForProjectId,
+} from './supply/settlementToProject.js';
 
 const useApi =
   String(import.meta.env.VITE_USE_API || '').toLowerCase() === '1' ||
@@ -126,18 +132,11 @@ const SUPPLY_CARD_INSTANCE_ALIASES = {
   '378': ['10100'],
 };
 
-/** 一张供应卡片对应多个业务 project_id 时，按日合并订单（同套餐双 id 取 max 去重） */
-const SUPPLY_CARD_ORDER_SOURCE_IDS = {
-  '401': ['401', '10125'],
-  '378': ['378', '10100'],
-};
-
-/** 多 project_id 并到一张卡：同一结算套餐会落到两个 id 上数值相同，按日取 max 去重，避免相加 double */
-function orderMapMergedForSupplyCard(pid, ordersByProjectDate) {
-  const keys = SUPPLY_CARD_ORDER_SOURCE_IDS[pid] || [pid];
+/** 多 project_id 并到一张卡：同一结算套餐会落到多个 id 上、数值相同，按日取 max 去重，避免订单 double */
+function orderMapMergedForSupplyCard(memberProjectIds, ordersByProjectDate) {
   const map = {};
-  for (const key of keys) {
-    const raw = ordersByProjectDate?.[String(key)] || {};
+  for (const key of memberProjectIds.map(String)) {
+    const raw = ordersByProjectDate?.[key] || {};
     for (const [k, v] of Object.entries(raw)) {
       const d = normalizeDateKey(k);
       if (!d) continue;
@@ -156,6 +155,75 @@ function orderMapMergedForSupplyCard(pid, ordersByProjectDate) {
   return map;
 }
 
+function mergeVmidSupplyForPids(memberProjectIds, vmidMapFull, byteOnly) {
+  const byDate = {};
+  if (byteOnly) return byDate;
+  for (const pid of memberProjectIds.map(String)) {
+    for (const [k, v] of Object.entries(vmidMapFull?.[pid] || {})) {
+      const d = normalizeDateKey(k);
+      if (!d) continue;
+      if (!byDate[d]) byDate[d] = { maxSum: 0, avgSum: 0, hasMax: false, hasAvg: false };
+      if (Number.isFinite(v.max)) {
+        byDate[d].maxSum += v.max;
+        byDate[d].hasMax = true;
+      }
+      if (Number.isFinite(v.avg)) {
+        byDate[d].avgSum += v.avg;
+        byDate[d].hasAvg = true;
+      }
+    }
+  }
+  const out = {};
+  for (const [d, o] of Object.entries(byDate)) {
+    out[d] = {
+      max: o.hasMax ? o.maxSum : NaN,
+      avg: o.hasAvg ? o.avgSum : NaN,
+    };
+  }
+  return out;
+}
+
+function mergedInstanceRowsForSupply(memberProjectIds, instanceByProjectId) {
+  const byDate = {};
+  for (const pid of memberProjectIds.map(String)) {
+    const rows = instanceRowsForSupplyProject(pid, instanceByProjectId);
+    for (const r of rows) {
+      const d = normalizeDateKey(r.date);
+      if (!d) continue;
+      if (!byDate[d]) {
+        byDate[d] = {
+          date: r.date,
+          totalMax: 0,
+          totalAvg: 0,
+          hasMax: false,
+          hasAvg: false,
+          avail: r.avail,
+          health: r.health,
+          total: r.total,
+        };
+      }
+      const tMax = Number(r.totalMax);
+      const tAvg = Number(r.totalAvg);
+      if (Number.isFinite(tMax)) {
+        byDate[d].totalMax += tMax;
+        byDate[d].hasMax = true;
+      }
+      if (Number.isFinite(tAvg)) {
+        byDate[d].totalAvg += tAvg;
+        byDate[d].hasAvg = true;
+      }
+    }
+  }
+  return Object.values(byDate).map((o) => ({
+    date: o.date,
+    totalMax: o.hasMax ? o.totalMax : undefined,
+    totalAvg: o.hasAvg ? o.totalAvg : undefined,
+    avail: o.avail,
+    health: o.health,
+    total: o.total,
+  }));
+}
+
 function instanceRowsForSupplyProject(projectId, instanceByProjectId) {
   const pid = String(projectId);
   const by = instanceByProjectId || {};
@@ -171,28 +239,75 @@ function instanceRowsForSupplyProject(projectId, instanceByProjectId) {
 /** 供应表最多展示天数（与实例/字节 SQL 近 7 天对齐；订单回退时也不再拉满整个账期周） */
 const SUPPLY_TABLE_DAYS = 7;
 
+function parseSupplyVmid7dDataset(ds) {
+  const cols = ds?.data?.cols ?? [];
+  const rows = ds?.data?.rows ?? [];
+  const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const findIdx = (keys) => {
+    const nkeys = keys.map(norm);
+    for (let i = 0; i < cols.length; i++) {
+      const name = norm(cols[i]?.name ?? cols[i]?.display_name ?? '');
+      if (!name) continue;
+      if (nkeys.some((k) => name.includes(k))) return i;
+    }
+    return -1;
+  };
+  const iDt = findIdx(['dt', 'date']);
+  const iPid = findIdx(['project_id', 'projectid']);
+  const iMax = findIdx(['max_count', 'maxcount']);
+  const iAvg = findIdx(['avg_count', 'avgcount']);
+  const byProject = {};
+  if (iDt === -1 || iPid === -1 || iMax === -1 || iAvg === -1) {
+    console.warn('[供应vmid7d] 返回列缺少 dt / project_id / max_count / avg_count');
+    return byProject;
+  }
+  for (const r of rows) {
+    const projectId = String(r[iPid] ?? '').trim();
+    if (!projectId) continue;
+    const dk = normalizeDateKey(r[iDt]);
+    if (!dk) continue;
+    const mx = Number(r[iMax]);
+    const av = Number(r[iAvg]);
+    if (!byProject[projectId]) byProject[projectId] = {};
+    byProject[projectId][dk] = {
+      max: Number.isFinite(mx) ? mx : NaN,
+      avg: Number.isFinite(av) ? av : NaN,
+    };
+  }
+  return byProject;
+}
+
 /**
- * 按项目合并：实例 7d 总门路数、字节 g_instance_id、订单。
- * - 33：日期仅来自字节专用 SQL；订单只按同日合并。
- * - 其它：日期来自实例 7d；无实例行时暂用订单日期但最多 SUPPLY_TABLE_DAYS 天（供应列为 — 表示实例 SQL 未返回该项目）。
+ * 按「供应卡片」合并：多项目卡为同一张结算套餐下多 biz id，供应路数按项目按日相加；33 仍为字节专用口径。
  */
-function buildSupplyTableForProject(projectId, instanceRows, byteSupplyByDate, ordersByProjectDate) {
-  const pid = String(projectId);
+function buildSupplyTableForProject(
+  memberProjectIds,
+  instanceByProjectId,
+  byteSupplyByDate,
+  ordersByProjectDate,
+  vmidMapFull,
+) {
+  const pids = memberProjectIds.map(String);
+  const byteOnly = pids.length === 1 && pids[0] === '33';
+
+  const instRows = mergedInstanceRowsForSupply(pids, instanceByProjectId);
   const instByD = {};
-  for (const r of instanceRows || []) {
+  for (const r of instRows || []) {
     const d = normalizeDateKey(r.date);
     if (!d) continue;
     instByD[d] = r;
   }
 
-  const byteRaw = pid === '33' ? byteSupplyByDate || {} : {};
+  const byteRaw = byteOnly ? byteSupplyByDate || {} : {};
   const byteByD = {};
   for (const [k, v] of Object.entries(byteRaw)) {
     const d = normalizeDateKey(k);
     if (d) byteByD[d] = v;
   }
 
-  const orderMapRaw = orderMapMergedForSupplyCard(pid, ordersByProjectDate);
+  const vmidD = mergeVmidSupplyForPids(pids, vmidMapFull, byteOnly);
+
+  const orderMapRaw = orderMapMergedForSupplyCard(pids, ordersByProjectDate);
   const orderMap = {};
   for (const [k, v] of Object.entries(orderMapRaw)) {
     const d = normalizeDateKey(k);
@@ -200,8 +315,9 @@ function buildSupplyTableForProject(projectId, instanceRows, byteSupplyByDate, o
   }
 
   const dates = new Set();
-  // 字节（33）：表格行数与日期只跟「专用 g_instance_id 近 7 天 SQL」一致，不并入订单/实例的其它日期
-  if (pid === '33') {
+  if (!byteOnly && Object.keys(vmidD).length > 0) {
+    for (const d of Object.keys(vmidD)) dates.add(d);
+  } else if (byteOnly) {
     for (const d of Object.keys(byteByD)) dates.add(d);
     if (dates.size === 0) return null;
   } else if (Object.keys(instByD).length > 0) {
@@ -211,15 +327,21 @@ function buildSupplyTableForProject(projectId, instanceRows, byteSupplyByDate, o
     if (dates.size === 0) return null;
   }
 
+  if (dates.size === 0) return null;
+
   const sortedDesc = sortDatesMmDdNewestFirst(Array.from(dates)).slice(0, SUPPLY_TABLE_DAYS);
 
   return sortedDesc.map((date) => {
     const inst = instByD[date];
-    const byteHit = pid === '33' ? byteByD[date] : undefined;
+    const byteHit = byteOnly ? byteByD[date] : undefined;
+    const vm = vmidD[date];
     let max;
     let avg;
 
-    if (pid === '33' && byteHit && (Number.isFinite(byteHit.max) || Number.isFinite(byteHit.avg))) {
+    if (!byteOnly && vm && (Number.isFinite(vm.max) || Number.isFinite(vm.avg))) {
+      max = Number.isFinite(vm.max) ? Math.round(vm.max) : '—';
+      avg = Number.isFinite(vm.avg) ? Math.round(vm.avg) : '—';
+    } else if (byteOnly && byteHit && (Number.isFinite(byteHit.max) || Number.isFinite(byteHit.avg))) {
       max = Number.isFinite(byteHit.max) ? Math.round(byteHit.max) : '—';
       avg = Number.isFinite(byteHit.avg) ? Math.round(byteHit.avg) : '—';
     } else if (inst && (Number.isFinite(Number(inst.totalMax)) || Number.isFinite(Number(inst.totalAvg)))) {
@@ -405,6 +527,40 @@ FROM
 GROUP BY dt
 ORDER BY dt ASC`;
 
+// 供应看板：全项目日 max/avg（vmid 按分钟 uniq，订单资源、12 点起，近 7 天；Metabase DB 默认 131）
+const SUPPLY_VMID_7D_SQL = `SELECT
+    dt,
+    project_id,
+    project_name,
+    max(cnt) AS max_count,
+    avg(cnt) AS avg_count
+FROM
+(
+    SELECT
+        dt,
+        project_id,
+        project_name,
+        toStartOfMinute(toDateTime(fmt_ts)) AS ts_min,
+        uniq(vmid) AS cnt
+    FROM game.dwd_cloudgame_game_vminfo_v2_inc
+    WHERE dt >= toDate(now() - INTERVAL 7 DAY)
+      AND dt < toDate(now())
+      AND resources_purpose = '订单资源'
+      AND toHour(toDateTime(fmt_ts)) >= 12
+    GROUP BY
+        dt,
+        project_id,
+        project_name,
+        ts_min
+)
+GROUP BY
+    dt,
+    project_id,
+    project_name
+ORDER BY
+    dt DESC,
+    project_id`;
+
 // --- Metabase：供应看板订单（结算套餐 -> 项目 聚合所需原始数据）---
 // dataset 返回列：
 // - date：日期（YYYY-MM-DD 或 YYYY/MM/DD，后续统一转成 MM-DD）
@@ -451,6 +607,9 @@ const INSTANCE_CURRENT_DB_ID = Number(import.meta.env.VITE_METABASE_INSTANCE_CUR
 const INSTANCE_AVAILABILITY_7D_DB_ID = Number(import.meta.env.VITE_METABASE_INSTANCE_AVAILABILITY_7D_DB_ID || 131);
 const METABASE_BYTE_DANCE_SUPPLY_7D_DB_ID = Number(
   import.meta.env.VITE_METABASE_BYTE_DANCE_SUPPLY_7D_DB_ID || 131,
+);
+const METABASE_SUPPLY_VMID_7D_DB_ID = Number(
+  import.meta.env.VITE_METABASE_SUPPLY_VMID_7D_DB_ID || 131,
 );
 
 const instanceTopProjects = [
@@ -602,26 +761,13 @@ const FilterBar = ({ projects, selectedProjectIds, setSelectedProjectIds }) => {
       ) : (
         <div />
       )}
-
-      <div className="flex items-center gap-2 bg-slate-50 p-1 rounded-lg border border-slate-200">
-        {['24h', '7天', '30天'].map((time, i) => (
-          <button
-            key={time}
-            className={`px-4 py-1 text-sm rounded-md transition-colors ${
-              i === 0 ? 'bg-white shadow-sm font-medium text-blue-600' : 'text-slate-500 hover:text-slate-700'
-            }`}
-          >
-            {time}
-          </button>
-        ))}
-      </div>
     </div>
   );
 };
 
 // --- 视图组件 (Views based on images) ---
 // 1. 供应看板 (Supply Dashboard)
-const SupplyView = ({ projectsToShow }) => {
+const SupplyView = ({ projectsToShow, loading = false }) => {
   const [expanded, setExpanded] = useState({});
   const toggleExpand = (id) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
@@ -630,6 +776,8 @@ const SupplyView = ({ projectsToShow }) => {
   const totalOrders = list.reduce((sum, p) => sum + (typeof p.order === 'number' ? p.order : 0), 0);
   const redundancyRatio =
     totalOrders > 0 ? ((totalSupply - totalOrders) / totalOrders) * 100 : 0;
+  /** 与卡片一致：冗余率 >5% 或供应低于订单（负数）标红，否则标绿 */
+  const overviewRedundancyAlert = redundancyRatio > 5 || redundancyRatio < 0;
 
   const accentPalettes = [
     { border: 'border-indigo-200', chip: 'bg-indigo-50 text-indigo-700', chart: '#4f46e5' },
@@ -641,6 +789,24 @@ const SupplyView = ({ projectsToShow }) => {
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <details className="group rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-2 text-xs text-slate-600 leading-relaxed open:pb-3">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 py-1 font-semibold text-slate-700 select-none [&::-webkit-details-marker]:hidden">
+          <span>数据计算说明</span>
+          <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
+        </summary>
+        <ul className="mt-2 list-disc space-y-1.5 pl-4 marker:text-slate-400">
+          <li>
+            <strong className="text-slate-700">供应</strong>：CH 近 7 个自然日（不含当天）、仅订单资源、12:00 起；分钟级 uniq(vmid) 聚成每日峰值/均值（展开表）；字节 33 走独立 SQL；一套餐多项目合并为一张卡、路数按日相加。卡片大数字 = 表里最近一日峰值 + 同日订单。
+          </li>
+          <li>
+            <strong className="text-slate-700">订单</strong>：Metabase 结算表，x86、去掉 CTEST、时间范围为 SQL 内业务周；只保留有「结算套餐→项目」映射的卡；同一套餐落到多个项目 ID 时按日取 max 去重，避免双计。
+          </li>
+          <li>
+            <strong className="text-slate-700">冗余</strong>：相对订单的富余率；总览与单卡规则一致——高于 5% 或供应低于订单为红，否则绿。折线为近若干天按日冗余率。
+          </li>
+        </ul>
+      </details>
+
       {/* 顶部总览卡片 */}
       <Card className="p-6">
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
@@ -653,18 +819,21 @@ const SupplyView = ({ projectsToShow }) => {
                 {redundancyRatio.toFixed(1)}
                 <span className="text-3xl">%</span>
               </span>
-              <TrendBadge value={`所有项目: 供应 ${totalSupply} / 订单 ${totalOrders}`} isPositive={redundancyRatio >= 0} />
+              <TrendBadge
+                value={`合计 峰值 ${totalSupply} / 订单 ${totalOrders}`}
+                isPositive={!overviewRedundancyAlert}
+              />
             </div>
           </div>
 
           <div className="flex gap-4 p-4 bg-slate-50 rounded-xl border border-slate-100 min-w-[300px]">
             <div className="flex-1">
-              <p className="text-xs text-slate-400 mb-1">供应 (当前)</p>
+              <p className="text-xs text-slate-400 mb-1">供应峰值（各卡最近一日）</p>
               <p className="text-xl font-semibold text-slate-700">{totalSupply.toLocaleString()}</p>
             </div>
             <div className="w-px bg-slate-200" />
             <div className="flex-1">
-              <p className="text-xs text-slate-400 mb-1">订单 (当前)</p>
+              <p className="text-xs text-slate-400 mb-1">订单（同上日）</p>
               <p className="text-xl font-semibold text-slate-700">{totalOrders.toLocaleString()}</p>
             </div>
           </div>
@@ -673,21 +842,44 @@ const SupplyView = ({ projectsToShow }) => {
 
       {/* 项目栅格：保证 100% 缩放下也尽量看得到 3 列 */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-        {list.map((proj) => {
+        {loading
+          ? Array.from({ length: 6 }).map((_, idx) => (
+              <Card key={`supply-loading-${idx}`} className="p-4 border border-slate-200 animate-pulse">
+                <div className="h-4 w-32 bg-slate-200 rounded mb-3" />
+                <div className="h-3 w-44 bg-slate-100 rounded mb-4" />
+                <div className="h-6 w-56 bg-slate-200 rounded mb-4" />
+                <div className="h-24 w-full bg-slate-100 rounded mb-4" />
+                <div className="h-3 w-20 bg-slate-200 rounded" />
+              </Card>
+            ))
+          : list.map((proj) => {
           const hasSupplyNum = typeof proj.supply === 'number' && Number.isFinite(proj.supply);
           const marginPct =
             hasSupplyNum && typeof proj.order === 'number' && proj.order > 0
               ? ((proj.supply - proj.order) / proj.order) * 100
               : 0;
+          const redundancyAlertCard = marginPct > 5 || marginPct < 0;
           const values = Array.isArray(proj.trend) ? proj.trend.map((d) => d.value) : [];
           const current = values.length ? values[values.length - 1] : 0;
           const max = values.length ? Math.max(...values) : 0;
           const min = values.length ? Math.min(...values) : 0;
 
           const fmtPct = (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
-          const tone = (v) => (v >= 0 ? 'text-emerald-600' : 'text-rose-600');
-          const pillBg = (v) => (v >= 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600');
-          const palette = accentPalettes[Number(proj.id) % accentPalettes.length] || accentPalettes[0];
+          const tone = (v) => {
+            const bad = v > 5 || v < 0;
+            return bad ? 'text-rose-600' : 'text-emerald-600';
+          };
+          const pillBg = (v) => {
+            const bad = v > 5 || v < 0;
+            return bad ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600';
+          };
+          const marginChipClass = redundancyAlertCard
+            ? 'bg-rose-50 text-rose-700'
+            : 'bg-emerald-50 text-emerald-700';
+          const paletteSeed =
+            Number(proj.mergedProjectIds?.[0] ?? String(proj.id).split('+')[0]) || 0;
+          const palette =
+            accentPalettes[Math.abs(paletteSeed) % accentPalettes.length] || accentPalettes[0];
 
           return (
           <Card
@@ -700,21 +892,23 @@ const SupplyView = ({ projectsToShow }) => {
                 <p className="text-xs text-slate-400 mt-0.5">{proj.sub || `项目 ID ${proj.id}`}</p>
               </div>
               <div className="text-right">
-                <span className={`text-xs px-2 py-1 rounded font-medium ${palette.chip}`}>冗余 {fmtPct(marginPct)}</span>
+                <span className={`text-xs px-2 py-1 rounded font-medium ${marginChipClass}`}>
+                  冗余 {fmtPct(marginPct)}
+                </span>
               </div>
             </div>
 
-            <div className="flex items-baseline gap-2 mb-4">
-              <span className="text-sm text-slate-500">
-                当前{proj.unit === '卡' ? '卡数' : '路数'}{' '}
-                <strong className="text-slate-800 text-lg">
-                  {hasSupplyNum ? proj.supply : '—'}
-                </strong>
-              </span>
+            <div className="flex items-baseline gap-2 flex-wrap mb-4 text-sm text-slate-600">
+              <span className="text-slate-500">{proj.unit === '卡' ? '峰值（卡）' : '峰值（路）'}</span>
+              {proj.supplyHeadlineDate ? (
+                <span className="text-slate-400 tabular-nums">{proj.supplyHeadlineDate}</span>
+              ) : null}
+              <strong className="text-slate-900 text-lg tabular-nums">
+                {hasSupplyNum ? proj.supply : '—'}
+              </strong>
               <span className="text-slate-300">|</span>
-              <span className="text-sm text-slate-500">
-                当前订单 <strong className="text-slate-800 text-lg">{proj.order}</strong>
-              </span>
+              <span className="text-slate-500">订单</span>
+              <strong className="text-slate-900 text-lg tabular-nums">{proj.order}</strong>
             </div>
 
             <div className="h-28 w-full mb-4">
@@ -811,7 +1005,7 @@ const SupplyView = ({ projectsToShow }) => {
             )}
           </Card>
           );
-        })}
+          })}
       </div>
     </div>
   );
@@ -1291,8 +1485,39 @@ export default function App() {
   const [instanceByProjectId, setInstanceByProjectId] = useState({});
   const [instanceProjectOptions, setInstanceProjectOptions] = useState([]);
   const [supplyProjects, setSupplyProjects] = useState(projects);
+  const [supplyLoading, setSupplyLoading] = useState(useApi);
   const [bytedanceSupplyByDate, setBytedanceSupplyByDate] = useState({});
+  const [supplyVmidByProjectId, setSupplyVmidByProjectId] = useState(() => (useApi ? undefined : {}));
   const [ordersByProjectDate, setOrdersByProjectDate] = useState(undefined);
+
+  useEffect(() => {
+    if (!useApi) setSupplyLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!useApi) return;
+    if (!SUPPLY_VMID_7D_SQL?.trim()) {
+      setSupplyVmidByProjectId({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const ds = await queryMetabaseNative({
+          database: METABASE_SUPPLY_VMID_7D_DB_ID,
+          query: SUPPLY_VMID_7D_SQL,
+        });
+        if (cancelled) return;
+        setSupplyVmidByProjectId(parseSupplyVmid7dDataset(ds));
+      } catch (e) {
+        console.error('[供应vmid7d] Metabase 失败，供应列回退实例/字节', e);
+        if (!cancelled) setSupplyVmidByProjectId({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!useApi || !BYTE_DANCE_SUPPLY_7D_SQL?.trim()) return;
@@ -1529,15 +1754,19 @@ export default function App() {
     };
   }, []);
 
-  // 供应看板：按项目用「实例 7d / 字节 / 订单」日期并集重建表格（不再多套 mock 行）
+  // 供应看板：按项目用「vmid 日汇总 / 实例 7d / 字节 / 订单」重建表格（不再多套 mock 行）
   useEffect(() => {
     if (!useApi) return;
+    if (supplyVmidByProjectId === undefined) return;
+
     const byProject = instanceByProjectId || {};
     const byteMap = bytedanceSupplyByDate || {};
+    const vmidMap = supplyVmidByProjectId || {};
     const hasInstance = Object.keys(byProject).length > 0;
     const hasByte = Object.keys(byteMap).length > 0;
+    const hasVmid = Object.keys(vmidMap).length > 0;
     const ordersReady = ordersByProjectDate !== undefined;
-    if (!hasInstance && !hasByte && !ordersReady) return;
+    if (!hasInstance && !hasByte && !ordersReady && !hasVmid) return;
 
     const orderData = ordersByProjectDate ?? {};
 
@@ -1558,33 +1787,54 @@ export default function App() {
       const seedById = {};
       for (const p of projects) seedById[String(p.id)] = p;
 
-      // 供应看板项目：取“已有卡片 + 实例返回 + 订单返回 + 字节固定项目”
+      // 供应看板项目：取“已有卡片 + 实例 + 订单 + vmid 汇总 + 字节”
       const allIds = new Set([
         ...Object.keys(prevById),
         ...Object.keys(byProject),
         ...Object.keys(orderData),
+        ...Object.keys(vmidMap),
       ]);
       if (hasByte) allIds.add('33');
 
-      const idList = Array.from(allIds);
+      const settlementByProject = getProjectIdToSettlementIds();
+      const hasSettlementForProject = (pid) => (settlementByProject[String(pid)] ?? []).length > 0;
+      const cardIdSet = new Set();
+      for (const pid of allIds) {
+        if (!hasSettlementForProject(pid)) continue;
+        cardIdSet.add(supplyCardIdForProjectId(pid));
+      }
+      const idList = Array.from(cardIdSet);
 
-      const cards = idList.map((pid) => {
-        const base = prevById[pid] || seedById[pid] || {};
-        const fromInstance = byProject[pid];
+      const cards = idList.map((cardId) => {
+        const memberIds = projectIdsForSupplyCardId(cardId);
+        const primaryPid = memberIds[0];
+        const base = prevById[cardId] || prevById[primaryPid] || seedById[primaryPid] || {};
         const name =
-          base.name ||
-          fromInstance?.name ||
-          (pid === '33' ? '字节跳动' : `项目 ${pid}`);
-        const unit = base.unit || (pid === '33' ? '卡' : '路');
+          memberIds.length === 1
+            ? base.name ||
+              byProject[primaryPid]?.name ||
+              seedById[primaryPid]?.name ||
+              (primaryPid === '33' ? '字节跳动' : `项目 ${primaryPid}`)
+            : memberIds
+                .map((pid) => {
+                  const fromInstance = byProject[pid]?.name;
+                  const seed = seedById[pid]?.name;
+                  return fromInstance || seed || (pid === '33' ? '字节跳动' : `项目 ${pid}`);
+                })
+                .join(' · ');
+        const sub =
+          memberIds.length > 1 ? `项目 ID ${memberIds.join('、')}` : base.sub || `项目 ID ${primaryPid}`;
+        const unit = base.unit || (memberIds.includes('33') ? '卡' : '路');
 
-        const instanceRows = instanceRowsForSupplyProject(pid, byProject);
-        const built = buildSupplyTableForProject(pid, instanceRows, byteMap, orderData);
+        const built = buildSupplyTableForProject(memberIds, byProject, byteMap, orderData, vmidMap);
         if (!built) {
           return {
-            id: pid,
+            id: cardId,
+            mergedProjectIds: memberIds,
             name,
             unit,
-            sub: base.sub,
+            sub,
+            supplyHeadlineDate: null,
             supply: base.supply ?? null,
             order: base.order ?? 0,
             margin: base.margin ?? '+0',
@@ -1593,26 +1843,18 @@ export default function App() {
           };
         }
 
-        let cardOrder = Number.isFinite(Number(base.order)) ? Number(base.order) : 0;
-        for (const row of built) {
-          if (Number.isFinite(Number(row.order))) {
-            cardOrder = Math.round(Number(row.order));
-            break;
-          }
-        }
-        let cardSupply = null;
-        for (const row of built) {
-          if (Number.isFinite(Number(row.max))) {
-            cardSupply = Math.round(Number(row.max));
-            break;
-          }
-        }
+        const h0 = built[0];
+        const supplyHeadlineDate = h0?.date ?? null;
+        const cardSupply = Number.isFinite(Number(h0?.max)) ? Math.round(Number(h0.max)) : null;
+        const cardOrder = Number.isFinite(Number(h0?.order)) ? Math.round(Number(h0.order)) : 0;
 
         return {
-          id: pid,
+          id: cardId,
+          mergedProjectIds: memberIds,
           name,
           unit,
-          sub: base.sub,
+          sub,
+          supplyHeadlineDate,
           margin: base.margin ?? '+0',
           table: built,
           trend: buildTrendFromTable(built),
@@ -1640,11 +1882,17 @@ export default function App() {
 
       return cards;
     });
-  }, [instanceByProjectId, bytedanceSupplyByDate, ordersByProjectDate]);
+    setSupplyLoading(false);
+  }, [instanceByProjectId, bytedanceSupplyByDate, ordersByProjectDate, supplyVmidByProjectId]);
 
   const supplyProjectsToShow =
     selectedProjectIds.length > 0
-      ? supplyProjects.filter((p) => selectedProjectIds.includes(String(p.id)))
+      ? supplyProjects.filter((p) => {
+          const sel = new Set(selectedProjectIds.map(String));
+          if (sel.has(String(p.id))) return true;
+          const members = p.mergedProjectIds || projectIdsForSupplyCardId(p.id);
+          return members.some((m) => sel.has(String(m)));
+        })
       : supplyProjects;
 
   const instanceProjectsToShow =
@@ -1713,7 +1961,7 @@ export default function App() {
         />
 
         <div className="mt-4">
-          {activeTab === 'supply' && <SupplyView projectsToShow={supplyProjectsToShow} />}
+          {activeTab === 'supply' && <SupplyView projectsToShow={supplyProjectsToShow} loading={supplyLoading} />}
           {activeTab === 'scheduling' && <SchedulingView />}
           {activeTab === 'tasks' && <CloudTaskView />}
           {activeTab === 'instances' && (

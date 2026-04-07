@@ -105,6 +105,88 @@ export function getProjectIdToSettlementIds() {
   return map;
 }
 
+/**
+ * 同一结算套餐映射多个 biz 项目时，供应看板合并为一张卡：路数按项目相加。
+ * 通过「多项目映射」并查集连通分量得到合并组（例如 401+10125、378+10100）。
+ */
+let _supplyCardMergeRegistry = null;
+
+function buildSupplyCardMergeRegistryInternal() {
+  const parent = Object.create(null);
+
+  function find(x) {
+    if (parent[x] === undefined) parent[x] = x;
+    if (parent[x] !== x) parent[x] = find(parent[x]);
+    return parent[x];
+  }
+
+  function union(a, b) {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  }
+
+  for (const pids of Object.values(SETTLEMENT_ID_TO_PROJECT_IDS)) {
+    if (!Array.isArray(pids) || pids.length < 2) continue;
+    const list = [...new Set(pids.map(normalizeId).filter(Boolean))];
+    if (list.length < 2) continue;
+    for (let i = 1; i < list.length; i++) union(list[0], list[i]);
+  }
+
+  const rootToMembers = new Map();
+  for (const pids of Object.values(SETTLEMENT_ID_TO_PROJECT_IDS)) {
+    if (!Array.isArray(pids)) continue;
+    for (const raw of pids) {
+      const pid = normalizeId(raw);
+      if (!pid) continue;
+      const root = find(pid);
+      if (!rootToMembers.has(root)) rootToMembers.set(root, new Set());
+      rootToMembers.get(root).add(pid);
+    }
+  }
+
+  const cmpPid = (a, b) => {
+    const na = Number(a);
+    const nb = Number(b);
+    if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+    return String(a).localeCompare(String(b), 'zh-CN');
+  };
+
+  /** @type {Record<string, string>} */
+  const projectIdToCardId = Object.create(null);
+  /** @type {Record<string, string[]>} */
+  const cardIdToProjectIds = Object.create(null);
+
+  for (const members of rootToMembers.values()) {
+    const projectIds = Array.from(members).sort(cmpPid);
+    const cardId = projectIds.join('+');
+    cardIdToProjectIds[cardId] = projectIds;
+    for (const p of projectIds) projectIdToCardId[p] = cardId;
+  }
+
+  return { projectIdToCardId, cardIdToProjectIds };
+}
+
+export function getSupplyCardMergeRegistry() {
+  if (!_supplyCardMergeRegistry) _supplyCardMergeRegistry = buildSupplyCardMergeRegistryInternal();
+  return _supplyCardMergeRegistry;
+}
+
+/** @param {string|number} projectId */
+export function supplyCardIdForProjectId(projectId) {
+  const { projectIdToCardId } = getSupplyCardMergeRegistry();
+  const p = normalizeId(projectId);
+  return projectIdToCardId[p] || p;
+}
+
+/** @param {string|number} cardId */
+export function projectIdsForSupplyCardId(cardId) {
+  const { cardIdToProjectIds } = getSupplyCardMergeRegistry();
+  const key = normalizeId(cardId);
+  if (cardIdToProjectIds[key]) return [...cardIdToProjectIds[key]];
+  return [key];
+}
+
 export const __SETTLEMENT_ID_TO_PROJECT_IDS__ = SETTLEMENT_ID_TO_PROJECT_IDS;
 
 function idxByColName(cols) {
