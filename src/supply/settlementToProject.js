@@ -42,6 +42,27 @@ const SETTLEMENT_ID_TO_PROJECT_IDS = {
   // 额外：你给了 `378` 和 `400` 等为第二列数据，这些已经在对应 settlement 映射里覆盖
 };
 
+/** 供应看板：自建 PAAS */
+export const SUPPLY_ENV_PAAS = 'paas';
+/** 供应看板：原力 Metabase（独立域名/账号；结算套餐映射见 YUANLI_SETTLEMENT） */
+export const SUPPLY_ENV_YUANLI = 'yuanli';
+
+// 原力 Tab 订单：dataset 来自自建 Metabase，与 PAAS 同源；此处仅定义「原力」结算套餐→项目，用于二次聚合
+const YUANLI_SETTLEMENT_ID_TO_PROJECT_IDS = {
+  SPVVF7MQ: ['5'],
+  SPP7TRZI: ['6'],
+  SP5BLFZK: ['8'],
+  SPWO9DD9: ['10'],
+  SP8VVP0K: ['20'],
+};
+
+function getSettlementMap(env) {
+  if (env === SUPPLY_ENV_YUANLI) {
+    return { ...YUANLI_SETTLEMENT_ID_TO_PROJECT_IDS };
+  }
+  return SETTLEMENT_ID_TO_PROJECT_IDS;
+}
+
 function normalizeId(id) {
   return String(id ?? '').trim();
 }
@@ -74,26 +95,30 @@ export function normalizeDateKey(raw) {
   return s;
 }
 
-export function projectIdsFromSettlementId(settlementId) {
+export function projectIdsFromSettlementId(settlementId, env = SUPPLY_ENV_PAAS) {
   const sid = normalizeId(settlementId);
-  return SETTLEMENT_ID_TO_PROJECT_IDS[sid] ? [...SETTLEMENT_ID_TO_PROJECT_IDS[sid]] : [];
+  const m = getSettlementMap(env);
+  return m[sid] ? [...m[sid]] : [];
 }
 
-export function settlementIdsFromProjectId(projectId) {
+export function settlementIdsFromProjectId(projectId, env = SUPPLY_ENV_PAAS) {
   const pid = normalizeId(projectId);
   const out = [];
-  for (const [sid, pids] of Object.entries(SETTLEMENT_ID_TO_PROJECT_IDS)) {
+  const m = getSettlementMap(env);
+  for (const [sid, pids] of Object.entries(m)) {
     if (pids.some((x) => normalizeId(x) === pid)) out.push(sid);
   }
   return out;
 }
 
-// 反向映射缓存：projectId -> settlementIds
-let _projectIdToSettlementIds = null;
-export function getProjectIdToSettlementIds() {
-  if (_projectIdToSettlementIds) return _projectIdToSettlementIds;
+// 反向映射缓存：env -> projectId -> settlementIds
+const _projectIdToSettlementIdsByEnv = Object.create(null);
+export function getProjectIdToSettlementIds(env = SUPPLY_ENV_PAAS) {
+  const key = env === SUPPLY_ENV_YUANLI ? SUPPLY_ENV_YUANLI : SUPPLY_ENV_PAAS;
+  if (_projectIdToSettlementIdsByEnv[key]) return _projectIdToSettlementIdsByEnv[key];
   const map = {};
-  for (const [sid, pids] of Object.entries(SETTLEMENT_ID_TO_PROJECT_IDS)) {
+  const m = getSettlementMap(env);
+  for (const [sid, pids] of Object.entries(m)) {
     for (const pid of pids) {
       const p = normalizeId(pid);
       if (!p) continue;
@@ -101,7 +126,7 @@ export function getProjectIdToSettlementIds() {
       map[p].push(sid);
     }
   }
-  _projectIdToSettlementIds = map;
+  _projectIdToSettlementIdsByEnv[key] = map;
   return map;
 }
 
@@ -109,9 +134,9 @@ export function getProjectIdToSettlementIds() {
  * 同一结算套餐映射多个 biz 项目时，供应看板合并为一张卡：路数按项目相加。
  * 通过「多项目映射」并查集连通分量得到合并组（例如 401+10125、378+10100）。
  */
-let _supplyCardMergeRegistry = null;
+const _supplyCardMergeRegistryByEnv = Object.create(null);
 
-function buildSupplyCardMergeRegistryInternal() {
+function buildSupplyCardMergeRegistryInternal(settlementMap) {
   const parent = Object.create(null);
 
   function find(x) {
@@ -126,7 +151,7 @@ function buildSupplyCardMergeRegistryInternal() {
     if (ra !== rb) parent[rb] = ra;
   }
 
-  for (const pids of Object.values(SETTLEMENT_ID_TO_PROJECT_IDS)) {
+  for (const pids of Object.values(settlementMap)) {
     if (!Array.isArray(pids) || pids.length < 2) continue;
     const list = [...new Set(pids.map(normalizeId).filter(Boolean))];
     if (list.length < 2) continue;
@@ -134,7 +159,7 @@ function buildSupplyCardMergeRegistryInternal() {
   }
 
   const rootToMembers = new Map();
-  for (const pids of Object.values(SETTLEMENT_ID_TO_PROJECT_IDS)) {
+  for (const pids of Object.values(settlementMap)) {
     if (!Array.isArray(pids)) continue;
     for (const raw of pids) {
       const pid = normalizeId(raw);
@@ -167,21 +192,24 @@ function buildSupplyCardMergeRegistryInternal() {
   return { projectIdToCardId, cardIdToProjectIds };
 }
 
-export function getSupplyCardMergeRegistry() {
-  if (!_supplyCardMergeRegistry) _supplyCardMergeRegistry = buildSupplyCardMergeRegistryInternal();
-  return _supplyCardMergeRegistry;
+export function getSupplyCardMergeRegistry(env = SUPPLY_ENV_PAAS) {
+  const key = env === SUPPLY_ENV_YUANLI ? SUPPLY_ENV_YUANLI : SUPPLY_ENV_PAAS;
+  if (_supplyCardMergeRegistryByEnv[key]) return _supplyCardMergeRegistryByEnv[key];
+  const reg = buildSupplyCardMergeRegistryInternal(getSettlementMap(env));
+  _supplyCardMergeRegistryByEnv[key] = reg;
+  return reg;
 }
 
 /** @param {string|number} projectId */
-export function supplyCardIdForProjectId(projectId) {
-  const { projectIdToCardId } = getSupplyCardMergeRegistry();
+export function supplyCardIdForProjectId(projectId, env = SUPPLY_ENV_PAAS) {
+  const { projectIdToCardId } = getSupplyCardMergeRegistry(env);
   const p = normalizeId(projectId);
   return projectIdToCardId[p] || p;
 }
 
 /** @param {string|number} cardId */
-export function projectIdsForSupplyCardId(cardId) {
-  const { cardIdToProjectIds } = getSupplyCardMergeRegistry();
+export function projectIdsForSupplyCardId(cardId, env = SUPPLY_ENV_PAAS) {
+  const { cardIdToProjectIds } = getSupplyCardMergeRegistry(env);
   const key = normalizeId(cardId);
   if (cardIdToProjectIds[key]) return [...cardIdToProjectIds[key]];
   return [key];
@@ -229,7 +257,7 @@ const PROJECT_ORDER_AGGREGATION_STRATEGY = {
 // - max    （plan_total = 包月+按天合计；你这里称“总数”）
 // - max_2  （plan_month_quantity；包月）
 // - max_3  （plan_day_quantity；按天=弹性）
-export function aggregateOrdersDatasetByProjectDate(dataset) {
+export function aggregateOrdersDatasetByProjectDate(dataset, env = SUPPLY_ENV_PAAS) {
   const cols = dataset?.data?.cols ?? [];
   const rows = dataset?.data?.rows ?? [];
   const idx = idxByColName(cols);
@@ -273,7 +301,7 @@ export function aggregateOrdersDatasetByProjectDate(dataset) {
     if (!date || !settlementId) continue;
     if (!Number.isFinite(total) || !Number.isFinite(month) || !Number.isFinite(elastic)) continue;
 
-    const projectIds = projectIdsFromSettlementId(settlementId);
+    const projectIds = projectIdsFromSettlementId(settlementId, env);
     if (!projectIds.length) continue;
 
     // 一个结算套餐映射多个项目：每个项目各记一笔；同项目多套餐在阶段二按 sum 聚合

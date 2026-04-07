@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState, startTransition } from 'react';
 import {
   LineChart,
   Line,
@@ -23,6 +23,7 @@ import {
   Clock,
   Users,
   Zap,
+  Loader2,
 } from 'lucide-react';
 
 import {
@@ -30,6 +31,8 @@ import {
   getProjectIdToSettlementIds,
   normalizeDateKey,
   projectIdsForSupplyCardId,
+  SUPPLY_ENV_PAAS,
+  SUPPLY_ENV_YUANLI,
   supplyCardIdForProjectId,
 } from './supply/settlementToProject.js';
 
@@ -43,7 +46,60 @@ const metabasePass = String(import.meta.env.VITE_METABASE_PASSWORD || '').trim()
 let metabaseSessionId = String(import.meta.env.VITE_METABASE_SESSION_TOKEN || '').trim();
 let metabaseLoginPromise = null;
 
-async function refreshMetabaseSessionViaLogin() {
+const yuanliMetabaseUser = String(import.meta.env.VITE_YUANLI_METABASE_USERNAME || '').trim();
+const yuanliMetabasePass = String(import.meta.env.VITE_YUANLI_METABASE_PASSWORD || '').trim();
+/** 原力站点根（无末尾 /）。设置后 session、dataset 均请求「该域名 + /api/...」；不设置则走开发代理 /api/metabase-yl */
+const yuanliMetabaseBaseUrl = String(
+  import.meta.env.VITE_YUANLI_METABASE_BASE_URL || '',
+)
+  .trim()
+  .replace(/\/+$/, '');
+let yuanliMetabaseSessionId = String(import.meta.env.VITE_YUANLI_METABASE_SESSION_TOKEN || '').trim();
+let yuanliMetabaseLoginPromise = null;
+
+function metabaseApiPrefix(audience) {
+  if (audience === SUPPLY_ENV_YUANLI) {
+    return yuanliMetabaseBaseUrl || '/api/metabase-yl';
+  }
+  return '/api/metabase';
+}
+
+async function refreshMetabaseSessionViaLogin(audience = SUPPLY_ENV_PAAS) {
+  if (audience === SUPPLY_ENV_YUANLI) {
+    if (!yuanliMetabaseUser || !yuanliMetabasePass) {
+      throw new Error(
+        '原力 Metabase 401：请在 .env 配置 VITE_YUANLI_METABASE_SESSION_TOKEN，或填写 VITE_YUANLI_METABASE_USERNAME / VITE_YUANLI_METABASE_PASSWORD',
+      );
+    }
+    if (yuanliMetabaseLoginPromise) return yuanliMetabaseLoginPromise;
+    yuanliMetabaseLoginPromise = (async () => {
+      const res = await fetch(`${metabaseApiPrefix(SUPPLY_ENV_YUANLI)}/api/session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: yuanliMetabaseUser, password: yuanliMetabasePass }),
+      });
+      const text = await res.text().catch(() => '');
+      if (!res.ok) {
+        throw new Error(`原力 Metabase 登录失败 ${res.status}: ${text.slice(0, 500)}`);
+      }
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`原力 Metabase 登录响应非 JSON: ${text.slice(0, 200)}`);
+      }
+      const id = data?.id;
+      if (!id) throw new Error('原力 Metabase 登录未返回 session id');
+      yuanliMetabaseSessionId = String(id);
+      return yuanliMetabaseSessionId;
+    })();
+    try {
+      return await yuanliMetabaseLoginPromise;
+    } finally {
+      yuanliMetabaseLoginPromise = null;
+    }
+  }
+
   if (!metabaseUser || !metabasePass) {
     throw new Error(
       'Metabase 401：请在 .env 更新 VITE_METABASE_SESSION_TOKEN，或填写 VITE_METABASE_USERNAME / VITE_METABASE_PASSWORD 以自动登录',
@@ -52,7 +108,7 @@ async function refreshMetabaseSessionViaLogin() {
   if (metabaseLoginPromise) return metabaseLoginPromise;
 
   metabaseLoginPromise = (async () => {
-    const res = await fetch('/api/metabase/api/session', {
+    const res = await fetch(`${metabaseApiPrefix(SUPPLY_ENV_PAAS)}/api/session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: metabaseUser, password: metabasePass }),
@@ -80,24 +136,28 @@ async function refreshMetabaseSessionViaLogin() {
   }
 }
 
-async function queryMetabaseNative({ database, query }) {
-  const run = () =>
-    fetch('/api/metabase/api/dataset', {
+async function queryMetabaseNative({ database, query, audience = SUPPLY_ENV_PAAS }) {
+  const prefix = metabaseApiPrefix(audience);
+  const run = () => {
+    const token = audience === SUPPLY_ENV_YUANLI ? yuanliMetabaseSessionId : metabaseSessionId;
+    return fetch(`${prefix}/api/dataset`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(metabaseSessionId ? { 'X-Metabase-Session': metabaseSessionId } : {}),
+        ...(token ? { 'X-Metabase-Session': token } : {}),
       },
       body: JSON.stringify({
         type: 'native',
         database,
-        native: { query },
+        native: { query, 'template-tags': {} },
       }),
     });
+  };
 
   let res = await run();
   if (res.status === 401) {
-    await refreshMetabaseSessionViaLogin();
+    await res.text().catch(() => '');
+    await refreshMetabaseSessionViaLogin(audience);
     res = await run();
   }
 
@@ -106,7 +166,22 @@ async function queryMetabaseNative({ database, query }) {
     throw new Error(`Metabase query failed: ${res.status} ${text}`);
   }
 
-  return res.json();
+  const text = await res.text().catch(() => '');
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed) {
+    const ct = res.headers.get('content-type') ?? '';
+    const cl = res.headers.get('content-length') ?? '';
+    throw new Error(
+      `Metabase 响应体为空 (HTTP ${res.status}，Content-Type=${ct || '—'}，Content-Length=${cl || '—'})。` +
+        `链路已通但并非有效 JSON；可重启 dev 试 vite 代理对原力已禁 gzip；若仍如此请在 Network 里看该请求 Response 是否真为空。`,
+    );
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch (e) {
+    const preview = trimmed.length > 400 ? `${trimmed.slice(0, 400)}…` : trimmed;
+    throw new Error(`Metabase 响应不是合法 JSON (HTTP ${res.status}): ${preview}`);
+  }
 }
 
 /** MM-DD 列表按“离今天最近的一天在前”排序 */
@@ -272,6 +347,68 @@ function parseSupplyVmid7dDataset(ds) {
     byProject[projectId][dk] = {
       max: Number.isFinite(mx) ? mx : NaN,
       avg: Number.isFinite(av) ? av : NaN,
+    };
+  }
+  return byProject;
+}
+
+function findDatasetColIdx(cols, aliases) {
+  for (let i = 0; i < cols.length; i++) {
+    const raw = String(cols[i]?.name ?? cols[i]?.display_name ?? '');
+    if (!raw) continue;
+    const ascii = raw.toLowerCase().replace(/[^a-z0-9]/g, '');
+    for (const a of aliases) {
+      if (raw.includes(a)) return i;
+      const na = String(a).toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (na && ascii.includes(na)) return i;
+    }
+  }
+  return -1;
+}
+
+/** 从原力供应 map 任一日数据里取业务名称（SQL 列「业务名称」/ biz_name） */
+function yuanliBizNameForProject(vmidMapFull, projectId) {
+  const dayMap = vmidMapFull?.[String(projectId)];
+  if (!dayMap || typeof dayMap !== 'object') return '';
+  for (const v of Object.values(dayMap)) {
+    const n = v?.bizName != null ? String(v.bizName).trim() : '';
+    if (n) return n;
+  }
+  return '';
+}
+
+/** 原力 Metabase：列「日期」「业务类型」「业务名称」「总数最大值」「总数平均值」（biz_type 仍作项目键与订单对齐） */
+function parseYuanliSupplyDataset(ds) {
+  const cols = ds?.data?.cols ?? [];
+  const rows = ds?.data?.rows ?? [];
+  const colNames = cols.map((c) => c?.name ?? c?.display_name ?? '').join(' | ');
+  const iDt = findDatasetColIdx(cols, ['日期', 'date', 'daily.date', 'dailydate']);
+  const iBiz = findDatasetColIdx(cols, ['业务类型', 'biz_type', 'biztype']);
+  const iName = findDatasetColIdx(cols, ['业务名称', 'biz_name', 'bizname']);
+  const iMax = findDatasetColIdx(cols, ['总数最大值', 'max_total', 'maxtotal']);
+  const iAvg = findDatasetColIdx(cols, ['总数平均值', 'avg_total', 'avgtotal']);
+  const byProject = {};
+  if (iDt === -1 || iBiz === -1 || iMax === -1 || iAvg === -1) {
+    console.warn(
+      `[原力供应] 列匹配失败，请对照 Metabase 列名调整解析。当前列: ${colNames || '(无)'}`,
+    );
+    return byProject;
+  }
+  for (const r of rows) {
+    const pid = String(r[iBiz] ?? '').trim();
+    if (!pid) continue;
+    const dk = normalizeDateKey(r[iDt]);
+    if (!dk) continue;
+    const mx = Number(r[iMax]);
+    const av = Number(r[iAvg]);
+    const bizName = iName !== -1 ? String(r[iName] ?? '').trim() : '';
+    if (!byProject[pid]) byProject[pid] = {};
+    const prev = byProject[pid][dk];
+    const mergedName = bizName || prev?.bizName;
+    byProject[pid][dk] = {
+      max: Number.isFinite(mx) ? mx : NaN,
+      avg: Number.isFinite(av) ? av : NaN,
+      ...(mergedName ? { bizName: mergedName } : {}),
     };
   }
   return byProject;
@@ -561,6 +698,56 @@ ORDER BY
     dt DESC,
     project_id`;
 
+// 原力环境供应：biz_type 与订单项目 ID 对齐；biz_name 作展示名称；Metabase database 默认 2
+const YUANLI_SUPPLY_7D_SQL = `SELECT
+    daily.date AS \`日期\`,
+    daily.biz_type AS \`业务类型\`,
+    daily.biz_name AS \`业务名称\`,
+    minute_stats.max_total AS \`总数最大值\`,
+    minute_stats.avg_total AS \`总数平均值\`
+FROM
+(
+    SELECT DISTINCT
+        toDate(fmt_ts) AS date,
+        biz_type,
+        biz_name
+    FROM game.dwd_cloudgame_game_vminfo_inc
+    WHERE
+        dt >= toDate(now() - toIntervalDay(7))
+        AND dt < toDate(now() + toIntervalDay(1))
+        AND fmt_ts >= now() - toIntervalDay(7)
+        AND fmt_ts < now() + toIntervalDay(1)
+        AND toHour(toDateTime(fmt_ts)) >= 12
+) AS daily
+INNER JOIN
+(
+    SELECT
+        biz_type,
+        biz_name,
+        max(total_minute) AS max_total,
+        avg(total_minute) AS avg_total
+    FROM
+    (
+        SELECT
+            toStartOfMinute(toDateTime(fmt_ts)) AS ts_min,
+            biz_type,
+            biz_name,
+            count(*) AS total_minute
+        FROM game.dwd_cloudgame_game_vminfo_inc
+        WHERE
+            dt >= toDate(now() - toIntervalDay(7))
+            AND dt < toDate(now() + toIntervalDay(1))
+            AND fmt_ts >= now() - toIntervalDay(7)
+            AND fmt_ts < now() + toIntervalDay(1)
+            AND toHour(toDateTime(fmt_ts)) >= 12
+        GROUP BY ts_min, biz_type, biz_name
+    ) AS minute_data
+    GROUP BY biz_type, biz_name
+) AS minute_stats
+ON daily.biz_type = minute_stats.biz_type
+AND daily.biz_name = minute_stats.biz_name
+ORDER BY daily.date ASC, daily.biz_type ASC, daily.biz_name ASC`;
+
 // --- Metabase：供应看板订单（结算套餐 -> 项目 聚合所需原始数据）---
 // dataset 返回列：
 // - date：日期（YYYY-MM-DD 或 YYYY/MM/DD，后续统一转成 MM-DD）
@@ -610,6 +797,13 @@ const METABASE_BYTE_DANCE_SUPPLY_7D_DB_ID = Number(
 );
 const METABASE_SUPPLY_VMID_7D_DB_ID = Number(
   import.meta.env.VITE_METABASE_SUPPLY_VMID_7D_DB_ID || 131,
+);
+/** 原力 Metabase：仅「原力供应」vminfo_inc SQL；订单与自建同源（自建 token + METABASE_SUPPLY_ORDERS_DB_ID） */
+const METABASE_YUANLI_DB_ID = Number(
+  import.meta.env.VITE_YUANLI_METABASE_DB_ID ||
+    import.meta.env.VITE_YUANLI_METABASE_SUPPLY_DB_ID ||
+    import.meta.env.VITE_YUANLI_METABASE_SUPPLY_ORDERS_DB_ID ||
+    2,
 );
 
 const instanceTopProjects = [
@@ -665,7 +859,7 @@ const TrendBadge = ({ value, isPositive = true }) => (
   </span>
 );
 
-const FilterBar = ({ projects, selectedProjectIds, setSelectedProjectIds }) => {
+const FilterBar = ({ projects, selectedProjectIds, setSelectedProjectIds, loading = false }) => {
   const [keyword, setKeyword] = useState('');
   const [open, setOpen] = useState(false);
 
@@ -693,7 +887,13 @@ const FilterBar = ({ projects, selectedProjectIds, setSelectedProjectIds }) => {
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-4 mb-6 bg-white p-3 rounded-xl shadow-sm border border-slate-100">
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
+        {loading ? (
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" aria-hidden />
+            加载中
+          </span>
+        ) : null}
         <div className="flex items-center bg-slate-50 rounded-lg p-1 border border-slate-200">
           <span className="px-3 py-1 text-sm text-slate-500 font-medium">项目</span>
           <button
@@ -767,11 +967,23 @@ const FilterBar = ({ projects, selectedProjectIds, setSelectedProjectIds }) => {
 
 // --- 视图组件 (Views based on images) ---
 // 1. 供应看板 (Supply Dashboard)
-const SupplyView = ({ projectsToShow, loading = false }) => {
+const SupplyView = ({
+  projectsToShow,
+  loading = false,
+  supplyEnv,
+  setSupplyEnv,
+  useApi: useApiProp = false,
+  yuanliMetabaseConfigured = false,
+}) => {
   const [expanded, setExpanded] = useState({});
   const toggleExpand = (id) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
-  const list = Array.isArray(projectsToShow) && projectsToShow.length > 0 ? projectsToShow : projects;
+  const list =
+    Array.isArray(projectsToShow) && projectsToShow.length > 0
+      ? projectsToShow
+      : supplyEnv === SUPPLY_ENV_YUANLI
+        ? []
+        : projects;
   const totalSupply = list.reduce((sum, p) => sum + (typeof p.supply === 'number' ? p.supply : 0), 0);
   const totalOrders = list.reduce((sum, p) => sum + (typeof p.order === 'number' ? p.order : 0), 0);
   const redundancyRatio =
@@ -787,8 +999,65 @@ const SupplyView = ({ projectsToShow, loading = false }) => {
     { border: 'border-amber-200', chip: 'bg-amber-50 text-amber-700', chart: '#d97706' },
   ];
 
+  const onEnv = typeof setSupplyEnv === 'function' ? setSupplyEnv : () => {};
+
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="space-y-6">
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => onEnv(SUPPLY_ENV_PAAS)}
+          className={`rounded-lg px-4 py-2 text-sm font-medium border transition-colors ${
+            supplyEnv === SUPPLY_ENV_PAAS
+              ? 'border-blue-200 bg-blue-50 text-blue-800 shadow-sm'
+              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+          }`}
+        >
+          自建 PAAS
+        </button>
+        <button
+          type="button"
+          onClick={() => onEnv(SUPPLY_ENV_YUANLI)}
+          className={`rounded-lg px-4 py-2 text-sm font-medium border transition-colors ${
+            supplyEnv === SUPPLY_ENV_YUANLI
+              ? 'border-blue-200 bg-blue-50 text-blue-800 shadow-sm'
+              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+          }`}
+        >
+          原力环境
+        </button>
+      </div>
+
+      {useApiProp && loading && (
+        <div className="flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-slate-600">
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-600" aria-hidden />
+          <span>正在加载订单与供应数据…</span>
+        </div>
+      )}
+
+      {useApiProp && supplyEnv === SUPPLY_ENV_YUANLI && !yuanliMetabaseConfigured && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 leading-relaxed">
+          <strong className="font-semibold">原力供应未配置</strong>：在{' '}
+          <span className="font-mono text-xs">.env</span> 填写{' '}
+          <span className="font-mono text-xs">VITE_YUANLI_METABASE_SESSION_TOKEN</span>（或用户名+密码）及{' '}
+          <span className="font-mono text-xs">VITE_YUANLI_METABASE_DB_ID</span>，重启 dev。订单仍用自建{' '}
+          <span className="font-mono text-xs">VITE_METABASE_*</span>。
+        </div>
+      )}
+
+      {useApiProp &&
+        supplyEnv === SUPPLY_ENV_YUANLI &&
+        yuanliMetabaseConfigured &&
+        !loading &&
+        Array.isArray(projectsToShow) &&
+        projectsToShow.length === 0 && (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 leading-relaxed">
+            原力供应接口已配置，但当前<strong>没有拼出任何卡片</strong>（或自建订单/原力供应解析为空）。订单走{' '}
+            <span className="font-mono text-xs">/api/metabase</span>，供应走{' '}
+            <span className="font-mono text-xs">/api/metabase-yl</span> — 请在 Network 里分别看是否报错。
+          </div>
+        )}
+
       <details className="group rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-2 text-xs text-slate-600 leading-relaxed open:pb-3">
         <summary className="flex cursor-pointer list-none items-center justify-between gap-2 py-1 font-semibold text-slate-700 select-none [&::-webkit-details-marker]:hidden">
           <span>数据计算说明</span>
@@ -796,13 +1065,17 @@ const SupplyView = ({ projectsToShow, loading = false }) => {
         </summary>
         <ul className="mt-2 list-disc space-y-1.5 pl-4 marker:text-slate-400">
           <li>
-            <strong className="text-slate-700">供应</strong>：CH 近 7 个自然日（不含当天）、仅订单资源、12:00 起；分钟级 uniq(vmid) 聚成每日峰值/均值（展开表）；字节 33 走独立 SQL；一套餐多项目合并为一张卡、路数按日相加。卡片大数字 = 表里最近一日峰值 + 同日订单。
+            <strong className="text-slate-700">原力</strong>：订单与自建同一 Metabase；仅结算套餐→项目用原力映射。供应走原力 CH（
+            <span className="font-mono text-[11px]">vminfo_inc</span>，12 点起），展示名用业务名称。
           </li>
           <li>
-            <strong className="text-slate-700">订单</strong>：Metabase 结算表，x86、去掉 CTEST、时间范围为 SQL 内业务周；只保留有「结算套餐→项目」映射的卡；同一套餐落到多个项目 ID 时按日取 max 去重，避免双计。
+            <strong className="text-slate-700">自建供应</strong>：近 7 天 vmid 峰值/均值；字节 33 单独口径。
           </li>
           <li>
-            <strong className="text-slate-700">冗余</strong>：相对订单的富余率；总览与单卡规则一致——高于 5% 或供应低于订单为红，否则绿。折线为近若干天按日冗余率。
+            <strong className="text-slate-700">订单</strong>：结算表 x86、去 CTEST；无映射套餐不出卡。
+          </li>
+          <li>
+            <strong className="text-slate-700">冗余</strong>：相对订单；高于 5% 或供应低于订单标红。
           </li>
         </ul>
       </details>
@@ -815,27 +1088,52 @@ const SupplyView = ({ projectsToShow, loading = false }) => {
               <Layers className="w-4 h-4" /> 供应监控冗余
             </h2>
             <div className="flex items-baseline gap-4">
-              <span className="text-5xl font-bold text-slate-900 tracking-tight">
-                {redundancyRatio.toFixed(1)}
-                <span className="text-3xl">%</span>
-              </span>
-              <TrendBadge
-                value={`合计 峰值 ${totalSupply} / 订单 ${totalOrders}`}
-                isPositive={!overviewRedundancyAlert}
-              />
+              {loading ? (
+                <div className="flex flex-col gap-2 py-1">
+                  <div className="h-12 w-36 bg-slate-200 rounded-lg animate-pulse" />
+                  <div className="h-6 w-48 bg-slate-100 rounded animate-pulse" />
+                </div>
+              ) : (
+                <>
+                  <span className="text-5xl font-bold text-slate-900 tracking-tight">
+                    {redundancyRatio.toFixed(1)}
+                    <span className="text-3xl">%</span>
+                  </span>
+                  <TrendBadge
+                    value={`合计 峰值 ${totalSupply} / 订单 ${totalOrders}`}
+                    isPositive={!overviewRedundancyAlert}
+                  />
+                </>
+              )}
             </div>
           </div>
 
           <div className="flex gap-4 p-4 bg-slate-50 rounded-xl border border-slate-100 min-w-[300px]">
-            <div className="flex-1">
-              <p className="text-xs text-slate-400 mb-1">供应峰值（各卡最近一日）</p>
-              <p className="text-xl font-semibold text-slate-700">{totalSupply.toLocaleString()}</p>
-            </div>
-            <div className="w-px bg-slate-200" />
-            <div className="flex-1">
-              <p className="text-xs text-slate-400 mb-1">订单（同上日）</p>
-              <p className="text-xl font-semibold text-slate-700">{totalOrders.toLocaleString()}</p>
-            </div>
+            {loading ? (
+              <>
+                <div className="flex-1 space-y-2">
+                  <div className="h-3 w-28 bg-slate-200 rounded animate-pulse" />
+                  <div className="h-7 w-20 bg-slate-200 rounded animate-pulse" />
+                </div>
+                <div className="w-px bg-slate-200" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-3 w-24 bg-slate-200 rounded animate-pulse" />
+                  <div className="h-7 w-16 bg-slate-200 rounded animate-pulse" />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex-1">
+                  <p className="text-xs text-slate-400 mb-1">供应峰值（各卡最近一日）</p>
+                  <p className="text-xl font-semibold text-slate-700">{totalSupply.toLocaleString()}</p>
+                </div>
+                <div className="w-px bg-slate-200" />
+                <div className="flex-1">
+                  <p className="text-xs text-slate-400 mb-1">订单（同上日）</p>
+                  <p className="text-xl font-semibold text-slate-700">{totalOrders.toLocaleString()}</p>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </Card>
@@ -1013,7 +1311,7 @@ const SupplyView = ({ projectsToShow, loading = false }) => {
 
 // 2. 调度与体验 (Scheduling)
 const SchedulingView = () => (
-  <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+  <div className="space-y-6">
     <Card className="p-0">
       <div className="flex border-b border-slate-100 bg-slate-50/50 p-4">
         <h2 className="text-lg font-semibold flex items-center gap-2 text-blue-600">
@@ -1073,7 +1371,7 @@ const SchedulingView = () => (
 
 // 3. 游戏云化任务 (Cloudification Tasks)
 const CloudTaskView = () => (
-  <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+  <div className="space-y-6">
     <Card className="overflow-hidden relative">
       {/* 装饰性背景 */}
       <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-50 rounded-full blur-3xl -mr-20 -mt-20 opacity-50 pointer-events-none" />
@@ -1115,7 +1413,7 @@ const CloudTaskView = () => (
 );
 
 // 4. 实例任务 (Instance Tasks)
-const InstanceView = ({ projectsToShow, instanceByProjectId }) => {
+const InstanceView = ({ projectsToShow, instanceByProjectId, loading = false }) => {
   const [expanded, setExpanded] = useState({});
   const toggleExpand = (id) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
@@ -1247,8 +1545,30 @@ const InstanceView = ({ projectsToShow, instanceByProjectId }) => {
   }, 0);
   const globalCurrentRatio = globalCurrentTotal > 0 ? (globalCurrentHealth / globalCurrentTotal) * 100 : 0;
 
+  if (loading && useApi) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2 text-sm text-slate-600">
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-600" aria-hidden />
+          正在加载实例数据…
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {[0, 1, 2].map((i) => (
+            <Card key={i} className="h-40 border border-slate-200 animate-pulse bg-slate-50" />
+          ))}
+        </div>
+        <div className="h-6 w-56 rounded bg-slate-200 animate-pulse" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Card key={i} className="h-64 border border-slate-200 animate-pulse bg-slate-50" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="space-y-6">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="p-4">
           <div className="flex justify-between items-start mb-3">
@@ -1481,6 +1801,8 @@ const InstanceView = ({ projectsToShow, instanceByProjectId }) => {
 // --- 主应用组件 (Main App Component) ---
 export default function App() {
   const [activeTab, setActiveTab] = useState('supply');
+  /** 已打开过的 Tab 保持挂载，切换时只 hidden，避免 Recharts 等整树重建 */
+  const [visitedTabs, setVisitedTabs] = useState(() => new Set(['supply']));
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [instanceByProjectId, setInstanceByProjectId] = useState({});
   const [instanceProjectOptions, setInstanceProjectOptions] = useState([]);
@@ -1488,10 +1810,17 @@ export default function App() {
   const [supplyLoading, setSupplyLoading] = useState(useApi);
   const [bytedanceSupplyByDate, setBytedanceSupplyByDate] = useState({});
   const [supplyVmidByProjectId, setSupplyVmidByProjectId] = useState(() => (useApi ? undefined : {}));
-  const [ordersByProjectDate, setOrdersByProjectDate] = useState(undefined);
+  const [supplyYuanliByProjectId, setSupplyYuanliByProjectId] = useState(() => (useApi ? undefined : {}));
+  const [ordersByProjectDatePaas, setOrdersByProjectDatePaas] = useState(undefined);
+  const [ordersByProjectDateYuanli, setOrdersByProjectDateYuanli] = useState(undefined);
+  const [supplyEnv, setSupplyEnv] = useState(SUPPLY_ENV_PAAS);
+  const [instanceLoading, setInstanceLoading] = useState(() => useApi);
 
   useEffect(() => {
-    if (!useApi) setSupplyLoading(false);
+    if (!useApi) {
+      setSupplyLoading(false);
+      setInstanceLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -1506,6 +1835,7 @@ export default function App() {
         const ds = await queryMetabaseNative({
           database: METABASE_SUPPLY_VMID_7D_DB_ID,
           query: SUPPLY_VMID_7D_SQL,
+          audience: SUPPLY_ENV_PAAS,
         });
         if (cancelled) return;
         setSupplyVmidByProjectId(parseSupplyVmid7dDataset(ds));
@@ -1539,6 +1869,7 @@ export default function App() {
         const ds = await queryMetabaseNative({
           database: METABASE_BYTE_DANCE_SUPPLY_7D_DB_ID,
           query: BYTE_DANCE_SUPPLY_7D_SQL,
+          audience: SUPPLY_ENV_PAAS,
         });
         if (cancelled) return;
         const cols = ds?.data?.cols ?? [];
@@ -1576,7 +1907,10 @@ export default function App() {
     if (!useApi) return;
     const shouldFetchCurrent = !!INSTANCE_CURRENT_AVAILABLE_SQL;
     const shouldFetchTrend = !!INSTANCE_AVAILABILITY_7D_SQL;
-    if (!shouldFetchCurrent && !shouldFetchTrend) return;
+    if (!shouldFetchCurrent && !shouldFetchTrend) {
+      setInstanceLoading(false);
+      return;
+    }
     let cancelled = false;
 
     const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -1590,12 +1924,21 @@ export default function App() {
       return -1;
     };
     (async () => {
+      setInstanceLoading(true);
       try {
         const curPromise = shouldFetchCurrent
-          ? queryMetabaseNative({ database: INSTANCE_CURRENT_DB_ID, query: INSTANCE_CURRENT_AVAILABLE_SQL })
+          ? queryMetabaseNative({
+              database: INSTANCE_CURRENT_DB_ID,
+              query: INSTANCE_CURRENT_AVAILABLE_SQL,
+              audience: SUPPLY_ENV_PAAS,
+            })
           : Promise.resolve(null);
         const trendPromise = shouldFetchTrend
-          ? queryMetabaseNative({ database: INSTANCE_AVAILABILITY_7D_DB_ID, query: INSTANCE_AVAILABILITY_7D_SQL })
+          ? queryMetabaseNative({
+              database: INSTANCE_AVAILABILITY_7D_DB_ID,
+              query: INSTANCE_AVAILABILITY_7D_SQL,
+              audience: SUPPLY_ENV_PAAS,
+            })
           : Promise.resolve(null);
 
         const [curDs, trendDs] = await Promise.all([curPromise, trendPromise]);
@@ -1724,6 +2067,8 @@ export default function App() {
         }
       } catch (e) {
         console.error('[实例任务] Metabase 接口失败，继续使用 mock', e);
+      } finally {
+        if (!cancelled) setInstanceLoading(false);
       }
     })();
 
@@ -1732,7 +2077,7 @@ export default function App() {
     };
   }, []);
 
-  // 供应看板：订单（写入 state；与实例/字节在同一 effect 里按项目合并，避免先后覆盖）
+  // 供应看板：订单 — 仅请求自建 Metabase 一次；原力 Tab 用同一 dataset + 原力结算映射聚合（不请求原力 token）
   useEffect(() => {
     if (!useApi) return;
     let cancelled = false;
@@ -1741,12 +2086,17 @@ export default function App() {
         const dataset = await queryMetabaseNative({
           database: METABASE_SUPPLY_ORDERS_DB_ID,
           query: METABASE_SQL_SUPPLY_ORDERS_7D_BY_SETTLEMENT,
+          audience: SUPPLY_ENV_PAAS,
         });
         if (cancelled) return;
-        setOrdersByProjectDate(aggregateOrdersDatasetByProjectDate(dataset));
+        setOrdersByProjectDatePaas(aggregateOrdersDatasetByProjectDate(dataset, SUPPLY_ENV_PAAS));
+        setOrdersByProjectDateYuanli(aggregateOrdersDatasetByProjectDate(dataset, SUPPLY_ENV_YUANLI));
       } catch (e) {
-        console.warn('[供应] 拉取订单失败，继续使用 mock', e);
-        if (!cancelled) setOrdersByProjectDate({});
+        console.warn('[供应] 订单拉取失败（自建 Metabase；原力映射同源 dataset）', e);
+        if (!cancelled) {
+          setOrdersByProjectDatePaas({});
+          setOrdersByProjectDateYuanli({});
+        }
       }
     })();
     return () => {
@@ -1754,21 +2104,57 @@ export default function App() {
     };
   }, []);
 
-  // 供应看板：按项目用「vmid 日汇总 / 实例 7d / 字节 / 订单」重建表格（不再多套 mock 行）
+  // 原力环境供应（biz_type + inc 表）
   useEffect(() => {
     if (!useApi) return;
-    if (supplyVmidByProjectId === undefined) return;
+    if (!YUANLI_SUPPLY_7D_SQL?.trim()) {
+      setSupplyYuanliByProjectId({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const ds = await queryMetabaseNative({
+          database: METABASE_YUANLI_DB_ID,
+          query: YUANLI_SUPPLY_7D_SQL,
+          audience: SUPPLY_ENV_YUANLI,
+        });
+        if (cancelled) return;
+        setSupplyYuanliByProjectId(parseYuanliSupplyDataset(ds));
+      } catch (e) {
+        console.error('[原力供应] Metabase 失败', e);
+        if (!cancelled) setSupplyYuanliByProjectId({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 供应看板：按环境与数据源合并卡片
+  useEffect(() => {
+    if (!useApi) return;
+    const isYl = supplyEnv === SUPPLY_ENV_YUANLI;
+    if (isYl) {
+      if (supplyYuanliByProjectId === undefined || ordersByProjectDateYuanli === undefined) {
+        setSupplyLoading(true);
+        setSupplyProjects([]);
+        return;
+      }
+    } else if (supplyVmidByProjectId === undefined || ordersByProjectDatePaas === undefined) {
+      return;
+    }
 
     const byProject = instanceByProjectId || {};
-    const byteMap = bytedanceSupplyByDate || {};
-    const vmidMap = supplyVmidByProjectId || {};
-    const hasInstance = Object.keys(byProject).length > 0;
-    const hasByte = Object.keys(byteMap).length > 0;
-    const hasVmid = Object.keys(vmidMap).length > 0;
-    const ordersReady = ordersByProjectDate !== undefined;
-    if (!hasInstance && !hasByte && !ordersReady && !hasVmid) return;
-
-    const orderData = ordersByProjectDate ?? {};
+    const instanceForSupply = isYl ? {} : byProject;
+    const byteMap = isYl ? {} : bytedanceSupplyByDate || {};
+    const vmidMap = isYl ? supplyYuanliByProjectId || {} : supplyVmidByProjectId || {};
+    const hasInstance = !isYl && Object.keys(byProject).length > 0;
+    const hasByte = !isYl && Object.keys(byteMap).length > 0;
+    const hasSupply = Object.keys(vmidMap).length > 0;
+    const orderData = isYl ? ordersByProjectDateYuanli ?? {} : ordersByProjectDatePaas ?? {};
+    const ordersReady = isYl ? ordersByProjectDateYuanli !== undefined : ordersByProjectDatePaas !== undefined;
+    if (!hasInstance && !hasByte && !ordersReady && !hasSupply) return;
 
     const buildTrendFromTable = (newTable) => {
       const ascRows = newTable.slice().reverse();
@@ -1787,37 +2173,43 @@ export default function App() {
       const seedById = {};
       for (const p of projects) seedById[String(p.id)] = p;
 
-      // 供应看板项目：取“已有卡片 + 实例 + 订单 + vmid 汇总 + 字节”
       const allIds = new Set([
-        ...Object.keys(prevById),
-        ...Object.keys(byProject),
+        ...(isYl ? [] : Object.keys(prevById)),
+        ...(isYl ? [] : Object.keys(byProject)),
         ...Object.keys(orderData),
         ...Object.keys(vmidMap),
       ]);
-      if (hasByte) allIds.add('33');
+      if (hasByte && !isYl) allIds.add('33');
 
-      const settlementByProject = getProjectIdToSettlementIds();
+      const settlementByProject = getProjectIdToSettlementIds(supplyEnv);
       const hasSettlementForProject = (pid) => (settlementByProject[String(pid)] ?? []).length > 0;
       const cardIdSet = new Set();
       for (const pid of allIds) {
         if (!hasSettlementForProject(pid)) continue;
-        cardIdSet.add(supplyCardIdForProjectId(pid));
+        cardIdSet.add(supplyCardIdForProjectId(pid, supplyEnv));
       }
       const idList = Array.from(cardIdSet);
 
       const cards = idList.map((cardId) => {
-        const memberIds = projectIdsForSupplyCardId(cardId);
+        const memberIds = projectIdsForSupplyCardId(cardId, supplyEnv);
         const primaryPid = memberIds[0];
-        const base = prevById[cardId] || prevById[primaryPid] || seedById[primaryPid] || {};
+        const base = isYl
+          ? seedById[primaryPid] || {}
+          : prevById[cardId] || prevById[primaryPid] || seedById[primaryPid] || {};
         const name =
           memberIds.length === 1
-            ? base.name ||
-              byProject[primaryPid]?.name ||
+            ? (isYl ? yuanliBizNameForProject(vmidMap, primaryPid) : '') ||
+              base.name ||
+              instanceForSupply[primaryPid]?.name ||
               seedById[primaryPid]?.name ||
               (primaryPid === '33' ? '字节跳动' : `项目 ${primaryPid}`)
             : memberIds
                 .map((pid) => {
-                  const fromInstance = byProject[pid]?.name;
+                  if (isYl) {
+                    const yl = yuanliBizNameForProject(vmidMap, pid);
+                    if (yl) return yl;
+                  }
+                  const fromInstance = instanceForSupply[pid]?.name;
                   const seed = seedById[pid]?.name;
                   return fromInstance || seed || (pid === '33' ? '字节跳动' : `项目 ${pid}`);
                 })
@@ -1826,7 +2218,13 @@ export default function App() {
           memberIds.length > 1 ? `项目 ID ${memberIds.join('、')}` : base.sub || `项目 ID ${primaryPid}`;
         const unit = base.unit || (memberIds.includes('33') ? '卡' : '路');
 
-        const built = buildSupplyTableForProject(memberIds, byProject, byteMap, orderData, vmidMap);
+        const built = buildSupplyTableForProject(
+          memberIds,
+          instanceForSupply,
+          byteMap,
+          orderData,
+          vmidMap,
+        );
         if (!built) {
           return {
             id: cardId,
@@ -1883,17 +2281,58 @@ export default function App() {
       return cards;
     });
     setSupplyLoading(false);
-  }, [instanceByProjectId, bytedanceSupplyByDate, ordersByProjectDate, supplyVmidByProjectId]);
+  }, [
+    supplyEnv,
+    instanceByProjectId,
+    bytedanceSupplyByDate,
+    ordersByProjectDatePaas,
+    ordersByProjectDateYuanli,
+    supplyVmidByProjectId,
+    supplyYuanliByProjectId,
+  ]);
 
   const supplyProjectsToShow =
     selectedProjectIds.length > 0
       ? supplyProjects.filter((p) => {
           const sel = new Set(selectedProjectIds.map(String));
           if (sel.has(String(p.id))) return true;
-          const members = p.mergedProjectIds || projectIdsForSupplyCardId(p.id);
+          const members = p.mergedProjectIds || projectIdsForSupplyCardId(p.id, supplyEnv);
           return members.some((m) => sel.has(String(m)));
         })
       : supplyProjects;
+
+  const yuanliMetabaseConfigured = Boolean(
+    String(import.meta.env.VITE_YUANLI_METABASE_SESSION_TOKEN || '').trim() ||
+      (String(import.meta.env.VITE_YUANLI_METABASE_USERNAME || '').trim() &&
+        String(import.meta.env.VITE_YUANLI_METABASE_PASSWORD || '').trim()),
+  );
+
+  const filterBarProjects = useMemo(() => {
+    if (activeTab === 'supply' && supplyEnv === SUPPLY_ENV_YUANLI) {
+      const ids = new Set(['5', '6', '8', '10', '20']);
+      for (const k of Object.keys(ordersByProjectDateYuanli || {})) ids.add(String(k));
+      for (const k of Object.keys(supplyYuanliByProjectId || {})) ids.add(String(k));
+      return Array.from(ids)
+        .sort((a, b) => {
+          const na = Number(a);
+          const nb = Number(b);
+          if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+          return String(a).localeCompare(String(b), 'zh-CN');
+        })
+        .map((id) => ({
+          id: String(id),
+          name: yuanliBizNameForProject(supplyYuanliByProjectId, id) || `项目 ${id}`,
+          unit: '路',
+        }));
+    }
+    return instanceProjectOptions.length ? instanceProjectOptions : projects;
+  }, [
+    activeTab,
+    supplyEnv,
+    instanceProjectOptions,
+    ordersByProjectDateYuanli,
+    supplyYuanliByProjectId,
+  ]);
 
   const instanceProjectsToShow =
     selectedProjectIds.length > 0
@@ -1937,7 +2376,13 @@ export default function App() {
                 return (
                   <button
                     key={tab.id}
-                    onClick={() => setActiveTab(tab.id)}
+                    type="button"
+                    onClick={() => {
+                      startTransition(() => {
+                        setActiveTab(tab.id);
+                        setVisitedTabs((prev) => new Set(prev).add(tab.id));
+                      });
+                    }}
                     className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
                       isActive ? 'bg-blue-50 text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
                     }`}
@@ -1955,17 +2400,43 @@ export default function App() {
       {/* 主内容区 (Main Content) */}
       <main className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <FilterBar
-          projects={instanceProjectOptions.length ? instanceProjectOptions : projects}
+          projects={filterBarProjects}
           selectedProjectIds={selectedProjectIds}
           setSelectedProjectIds={setSelectedProjectIds}
+          loading={useApi && activeTab === 'supply' && supplyLoading}
         />
 
         <div className="mt-4">
-          {activeTab === 'supply' && <SupplyView projectsToShow={supplyProjectsToShow} loading={supplyLoading} />}
-          {activeTab === 'scheduling' && <SchedulingView />}
-          {activeTab === 'tasks' && <CloudTaskView />}
-          {activeTab === 'instances' && (
-            <InstanceView projectsToShow={instanceProjectsToShow} instanceByProjectId={instanceByProjectId} />
+          {visitedTabs.has('supply') && (
+            <div role="tabpanel" id="tabpanel-supply" aria-hidden={activeTab !== 'supply'} hidden={activeTab !== 'supply'}>
+              <SupplyView
+                projectsToShow={supplyProjectsToShow}
+                loading={supplyLoading}
+                supplyEnv={supplyEnv}
+                setSupplyEnv={setSupplyEnv}
+                useApi={useApi}
+                yuanliMetabaseConfigured={yuanliMetabaseConfigured}
+              />
+            </div>
+          )}
+          {visitedTabs.has('scheduling') && (
+            <div role="tabpanel" id="tabpanel-scheduling" aria-hidden={activeTab !== 'scheduling'} hidden={activeTab !== 'scheduling'}>
+              <SchedulingView />
+            </div>
+          )}
+          {visitedTabs.has('tasks') && (
+            <div role="tabpanel" id="tabpanel-tasks" aria-hidden={activeTab !== 'tasks'} hidden={activeTab !== 'tasks'}>
+              <CloudTaskView />
+            </div>
+          )}
+          {visitedTabs.has('instances') && (
+            <div role="tabpanel" id="tabpanel-instances" aria-hidden={activeTab !== 'instances'} hidden={activeTab !== 'instances'}>
+              <InstanceView
+                projectsToShow={instanceProjectsToShow}
+                instanceByProjectId={instanceByProjectId}
+                loading={useApi && instanceLoading}
+              />
+            </div>
           )}
         </div>
       </main>
