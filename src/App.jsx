@@ -654,7 +654,7 @@ FROM
         uniq(\`game\`.\`dwd_cloudgame_game_vminfo_v2_inc\`.\`g_instance_id\`) AS cnt
     FROM \`game\`.\`dwd_cloudgame_game_vminfo_v2_inc\`
     WHERE (\`game\`.\`dwd_cloudgame_game_vminfo_v2_inc\`.\`dt\` >= toDate((CAST(now() AS timestamp) + INTERVAL -7 day))
-       AND \`game\`.\`dwd_cloudgame_game_vminfo_v2_inc\`.\`dt\` < toDate(now())
+       AND \`game\`.\`dwd_cloudgame_game_vminfo_v2_inc\`.\`dt\` < toDate((CAST(now() AS timestamp) + INTERVAL 1 day))
        AND \`game\`.\`dwd_cloudgame_game_vminfo_v2_inc\`.\`project_id\` = '33'
        AND toHour(toDateTime(\`game\`.\`dwd_cloudgame_game_vminfo_v2_inc\`.\`fmt_ts\`)) >= 12
        AND toHour(toDateTime(\`game\`.\`dwd_cloudgame_game_vminfo_v2_inc\`.\`fmt_ts\`)) < 20)
@@ -682,7 +682,7 @@ FROM
         uniq(vmid) AS cnt
     FROM game.dwd_cloudgame_game_vminfo_v2_inc
     WHERE dt >= toDate(now() - INTERVAL 7 DAY)
-      AND dt < toDate(now())
+      AND dt < toDate(now() + INTERVAL 1 DAY)
       AND resources_purpose = '订单资源'
       AND toHour(toDateTime(fmt_ts)) >= 12
     GROUP BY
