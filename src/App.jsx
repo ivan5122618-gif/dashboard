@@ -753,20 +753,8 @@ FROM coms_purchase_order_settlement_view
 WHERE
   (
     (coms_purchase_order_settlement_view.customer_id <> 'CTEST' OR coms_purchase_order_settlement_view.customer_id IS NULL)
-    AND coms_purchase_order_settlement_view.date >= date_add(
-      str_to_date(
-        concat(yearweek(date_add(date_add(now(6), INTERVAL -1 week), INTERVAL -1 day)), ' Sunday'),
-        '%X%V %W'
-      ),
-      INTERVAL 1 day
-    )
-    AND coms_purchase_order_settlement_view.date < date_add(
-      str_to_date(
-        concat(yearweek(date_add(date_add(now(6), INTERVAL 1 week), INTERVAL -1 day)), ' Sunday'),
-        '%X%V %W'
-      ),
-      INTERVAL 1 day
-    )
+    AND coms_purchase_order_settlement_view.date >= date_sub(curdate(), interval 7 day)
+    AND coms_purchase_order_settlement_view.date < date_add(curdate(), interval 1 day)
     AND coms_purchase_order_settlement_view.resource_type = 'x86'
   )
 GROUP BY
