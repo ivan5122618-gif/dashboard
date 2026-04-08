@@ -1690,10 +1690,10 @@ const InstanceView = ({ projectsToShow, instanceByProjectId, loading = false }) 
               </div>
             </div>
 
-            <div className="h-24 w-full mb-2 overflow-visible">
+            <div className="h-28 w-full mb-3 overflow-visible">
               <p className="text-xs text-slate-400 mb-1">近 7 天可用率</p>
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={proj.trend} margin={{ top: 0, right: 0, left: 0, bottom: 6 }}>
+                <LineChart data={proj.trend} margin={{ top: 0, right: 4, left: 2, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                   <XAxis
                     dataKey="time"
@@ -1709,8 +1709,8 @@ const InstanceView = ({ projectsToShow, instanceByProjectId, loading = false }) 
                     tick={{ fontSize: 10, fill: '#64748b' }}
                     axisLine={false}
                     tickLine={false}
-                    width={28}
-                    dx={-6}
+                    width={36}
+                    dx={0}
                     tickFormatter={(v) => `${Number(v).toFixed(0)}%`}
                   />
                   <Tooltip
