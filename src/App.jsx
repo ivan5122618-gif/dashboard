@@ -1785,8 +1785,6 @@ const InstanceView = ({ projectsToShow, instanceByProjectId, loading = false }) 
 // --- 主应用组件 (Main App Component) ---
 export default function App() {
   const [activeTab, setActiveTab] = useState('supply');
-  /** 已打开过的 Tab 保持挂载，切换时只 hidden，避免 Recharts 等整树重建 */
-  const [visitedTabs, setVisitedTabs] = useState(() => new Set(['supply']));
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [instanceByProjectId, setInstanceByProjectId] = useState({});
   const [instanceProjectOptions, setInstanceProjectOptions] = useState([]);
@@ -2343,6 +2341,7 @@ export default function App() {
     { id: 'supply', label: '供应看板', icon: Monitor },
   ];
 
+
   return (
     <div className="min-h-screen bg-[#f8fafc] text-slate-900 font-sans selection:bg-blue-100 selection:text-blue-900 pb-12">
       {/* 顶部导航 (Header) */}
@@ -2372,12 +2371,7 @@ export default function App() {
                   <button
                     key={tab.id}
                     type="button"
-                    onClick={() => {
-                      startTransition(() => {
-                        setActiveTab(tab.id);
-                        setVisitedTabs((prev) => new Set(prev).add(tab.id));
-                      });
-                    }}
+                    onClick={() => startTransition(() => setActiveTab(tab.id))}
                     className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
                       isActive ? 'bg-blue-50 text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
                     }`}
@@ -2388,6 +2382,7 @@ export default function App() {
                 );
               })}
             </nav>
+
           </div>
         </div>
       </header>
@@ -2402,8 +2397,8 @@ export default function App() {
         />
 
         <div className="mt-4">
-          {visitedTabs.has('supply') && (
-            <div role="tabpanel" id="tabpanel-supply" aria-hidden={activeTab !== 'supply'} hidden={activeTab !== 'supply'}>
+          {activeTab === 'supply' && (
+            <div role="tabpanel" id="tabpanel-supply">
               <SupplyView
                 projectsToShow={supplyProjectsToShow}
                 supplyFetchPending={supplyFetchPending}
@@ -2414,18 +2409,18 @@ export default function App() {
               />
             </div>
           )}
-          {visitedTabs.has('scheduling') && (
-            <div role="tabpanel" id="tabpanel-scheduling" aria-hidden={activeTab !== 'scheduling'} hidden={activeTab !== 'scheduling'}>
+          {activeTab === 'scheduling' && (
+            <div role="tabpanel" id="tabpanel-scheduling">
               <SchedulingView />
             </div>
           )}
-          {visitedTabs.has('tasks') && (
-            <div role="tabpanel" id="tabpanel-tasks" aria-hidden={activeTab !== 'tasks'} hidden={activeTab !== 'tasks'}>
+          {activeTab === 'tasks' && (
+            <div role="tabpanel" id="tabpanel-tasks">
               <CloudTaskView />
             </div>
           )}
-          {visitedTabs.has('instances') && (
-            <div role="tabpanel" id="tabpanel-instances" aria-hidden={activeTab !== 'instances'} hidden={activeTab !== 'instances'}>
+          {activeTab === 'instances' && (
+            <div role="tabpanel" id="tabpanel-instances">
               <InstanceView
                 projectsToShow={instanceProjectsToShow}
                 instanceByProjectId={instanceByProjectId}
