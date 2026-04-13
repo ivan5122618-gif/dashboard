@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "wecom-proxy": "node scripts/wecom-settlement-proxy.mjs",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"

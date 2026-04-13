@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, startTransition } from 'react';
+import React, { useEffect, useMemo, useRef, useState, startTransition } from 'react';
 import {
   LineChart,
   Line,
@@ -28,6 +28,7 @@ import {
 
 import {
   aggregateOrdersDatasetByProjectDate,
+  applyWecomSettlementMaps,
   getProjectIdToSettlementIds,
   normalizeDateKey,
   projectIdsForSupplyCardId,
@@ -40,21 +41,50 @@ const useApi =
   String(import.meta.env.VITE_USE_API || '').toLowerCase() === '1' ||
   String(import.meta.env.VITE_USE_API || '').toLowerCase() === 'true';
 
+/** 企微 PAAS 结算映射 JSON；生产可设为独立代理完整 URL */
+const WECOM_SETTLEMENT_MAP_URL =
+  String(import.meta.env.VITE_WECOM_SETTLEMENT_MAP_URL || '').trim() || '/api/wecom/settlement-map';
+/** 设为 1 时控制台打印结算映射来自企微还是代码兜底（调试用） */
+const debugSettlementMap =
+  String(import.meta.env.VITE_DEBUG_SETTLEMENT_MAP || '').trim() === '1' ||
+  String(import.meta.env.VITE_DEBUG_SETTLEMENT_MAP || '').toLowerCase() === 'true';
+
+/** 去掉 .env 里为防特殊字符加的外层引号，避免整串被当成空或带错字符 */
+function normalizeDotenvValue(raw) {
+  let s = String(raw ?? '').trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1);
+  }
+  return s;
+}
+
 const metabaseUser = String(import.meta.env.VITE_METABASE_USERNAME || '').trim();
-const metabasePass = String(import.meta.env.VITE_METABASE_PASSWORD || '').trim();
-/** 可变 session：优先 .env TOKEN；401 时用账号密码向 /api/session 换新 */
-let metabaseSessionId = String(import.meta.env.VITE_METABASE_SESSION_TOKEN || '').trim();
+const metabasePass = normalizeDotenvValue(import.meta.env.VITE_METABASE_PASSWORD);
+/**
+ * 自建 Metabase session：仅账密时启动不带 .env TOKEN（避免过期 UUID 先发请求再失败）；
+ * 首次 /api/dataset 401 后由 queryMetabaseNative 调 /api/session 换新。仅有 TOKEN 无账密时仍用 TOKEN。
+ */
+let metabaseSessionId =
+  metabaseUser && metabasePass
+    ? ''
+    : String(import.meta.env.VITE_METABASE_SESSION_TOKEN || '').trim();
 let metabaseLoginPromise = null;
 
 const yuanliMetabaseUser = String(import.meta.env.VITE_YUANLI_METABASE_USERNAME || '').trim();
-const yuanliMetabasePass = String(import.meta.env.VITE_YUANLI_METABASE_PASSWORD || '').trim();
+const yuanliMetabasePass = normalizeDotenvValue(import.meta.env.VITE_YUANLI_METABASE_PASSWORD);
 /** 原力站点根（无末尾 /）。设置后 session、dataset 均请求「该域名 + /api/...」；不设置则走开发代理 /api/metabase-yl */
 const yuanliMetabaseBaseUrl = String(
   import.meta.env.VITE_YUANLI_METABASE_BASE_URL || '',
 )
   .trim()
   .replace(/\/+$/, '');
-let yuanliMetabaseSessionId = String(import.meta.env.VITE_YUANLI_METABASE_SESSION_TOKEN || '').trim();
+let yuanliMetabaseSessionId =
+  yuanliMetabaseUser && yuanliMetabasePass
+    ? ''
+    : String(import.meta.env.VITE_YUANLI_METABASE_SESSION_TOKEN || '').trim();
 let yuanliMetabaseLoginPromise = null;
 
 function metabaseApiPrefix(audience) {
@@ -138,13 +168,25 @@ async function refreshMetabaseSessionViaLogin(audience = SUPPLY_ENV_PAAS) {
 
 async function queryMetabaseNative({ database, query, audience = SUPPLY_ENV_PAAS }) {
   const prefix = metabaseApiPrefix(audience);
+  const hasPasswordLogin =
+    audience === SUPPLY_ENV_YUANLI
+      ? Boolean(yuanliMetabaseUser && yuanliMetabasePass)
+      : Boolean(metabaseUser && metabasePass);
+
   const run = () => {
     const token = audience === SUPPLY_ENV_YUANLI ? yuanliMetabaseSessionId : metabaseSessionId;
+    /** 部分 Metabase/网关只认 Cookie；与 X-Metabase-Session 一并带上 */
+    const sessionHeaders = token
+      ? {
+          'X-Metabase-Session': token,
+          Cookie: `metabase.SESSION=${token}`,
+        }
+      : {};
     return fetch(`${prefix}/api/dataset`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(token ? { 'X-Metabase-Session': token } : {}),
+        ...sessionHeaders,
       },
       body: JSON.stringify({
         type: 'native',
@@ -154,16 +196,31 @@ async function queryMetabaseNative({ database, query, audience = SUPPLY_ENV_PAAS
     });
   };
 
-  let res = await run();
-  if (res.status === 401) {
-    await res.text().catch(() => '');
+  const curToken = audience === SUPPLY_ENV_YUANLI ? yuanliMetabaseSessionId : metabaseSessionId;
+  if (!curToken && hasPasswordLogin) {
     await refreshMetabaseSessionViaLogin(audience);
+  }
+
+  let res = await run();
+  /** token 失效或错误时清空内存 session，用账密重新 POST /api/session，最多两轮 */
+  let refreshAttempts = 0;
+  while (res.status === 401) {
+    await res.text().catch(() => '');
+    if (!hasPasswordLogin || refreshAttempts >= 2) break;
+    if (audience === SUPPLY_ENV_YUANLI) yuanliMetabaseSessionId = '';
+    else metabaseSessionId = '';
+    await refreshMetabaseSessionViaLogin(audience);
+    refreshAttempts++;
     res = await run();
   }
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`Metabase query failed: ${res.status} ${text}`);
+    const hint401 =
+      res.status === 401 && !hasPasswordLogin
+        ? '（401：请在 .env 配置 VITE_METABASE_SESSION_TOKEN 或 VITE_METABASE_USERNAME + VITE_METABASE_PASSWORD；原力同理 VITE_YUANLI_*）'
+        : '';
+    throw new Error(`Metabase query failed: ${res.status} ${text}${hint401}`);
   }
 
   const text = await res.text().catch(() => '');
@@ -1795,6 +1852,9 @@ export default function App() {
   const [ordersByProjectDatePaas, setOrdersByProjectDatePaas] = useState(undefined);
   const [ordersByProjectDateYuanli, setOrdersByProjectDateYuanli] = useState(undefined);
   const [supplyEnv, setSupplyEnv] = useState(SUPPLY_ENV_PAAS);
+  /** 企微映射更新后递增，驱动供应卡片按新 settlement→项目关系重算 */
+  const [settlementMapEpoch, setSettlementMapEpoch] = useState(0);
+  const supplyOrdersDatasetRef = useRef(null);
   const [instanceLoading, setInstanceLoading] = useState(() => useApi);
 
   useEffect(() => {
@@ -2085,13 +2145,78 @@ export default function App() {
           audience: SUPPLY_ENV_PAAS,
         });
         if (cancelled) return;
+        supplyOrdersDatasetRef.current = dataset;
         setOrdersByProjectDatePaas(aggregateOrdersDatasetByProjectDate(dataset, SUPPLY_ENV_PAAS));
         setOrdersByProjectDateYuanli(aggregateOrdersDatasetByProjectDate(dataset, SUPPLY_ENV_YUANLI));
       } catch (e) {
         console.warn('[供应] 订单拉取失败（自建 Metabase；原力映射同源 dataset）', e);
         if (!cancelled) {
+          supplyOrdersDatasetRef.current = null;
           setOrdersByProjectDatePaas({});
           setOrdersByProjectDateYuanli({});
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 企微智能表格：PAAS 结算套餐→项目映射（凭证仅在 dev 中间件或独立代理上，见 .env.example）
+  useEffect(() => {
+    if (String(import.meta.env.VITE_WECOM_SETTLEMENT_MAP_DISABLED || '').trim() === '1') {
+      if (debugSettlementMap) {
+        console.info(
+          '[结算映射] 未请求企业微信（VITE_WECOM_SETTLEMENT_MAP_DISABLED=1）→ 使用 settlementToProject.js 代码内兜底映射',
+        );
+      }
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        if (debugSettlementMap) {
+          console.info('[结算映射] 正在请求', WECOM_SETTLEMENT_MAP_URL, '（企业微信智能表格经服务端拉取）');
+        }
+        const res = await fetch(WECOM_SETTLEMENT_MAP_URL, { credentials: 'same-origin' });
+        if (!res.ok) {
+          if (debugSettlementMap) {
+            console.info(
+              '[结算映射] 企微映射接口失败 HTTP',
+              res.status,
+              '→ 保持代码内兜底；可看 Network 里 settlement-map 响应',
+            );
+          }
+          return;
+        }
+        const data = await res.json();
+        if (!data || data.error || typeof data.paas !== 'object') {
+          if (debugSettlementMap) {
+            console.info('[结算映射] 响应无有效 paas 字段或含 error → 未覆盖兜底', data?.error || data);
+          }
+          return;
+        }
+        if (cancelled) return;
+        const bundle = { paas: data.paas };
+        if (typeof data.yuanli === 'object') bundle.yuanli = data.yuanli;
+        applyWecomSettlementMaps(bundle);
+        if (debugSettlementMap) {
+          console.info('[结算映射] 已应用企业微信智能表格数据', {
+            fetchedAt: data.fetchedAt,
+            paas套餐数: Object.keys(bundle.paas).length,
+            yuanli套餐数: Object.keys(bundle.yuanli || {}).length,
+          });
+        }
+        setSettlementMapEpoch((n) => n + 1);
+        const ds = supplyOrdersDatasetRef.current;
+        if (ds) {
+          setOrdersByProjectDatePaas(aggregateOrdersDatasetByProjectDate(ds, SUPPLY_ENV_PAAS));
+          setOrdersByProjectDateYuanli(aggregateOrdersDatasetByProjectDate(ds, SUPPLY_ENV_YUANLI));
+        }
+      } catch (e) {
+        console.warn('[企微结算映射] 拉取失败，使用代码内兜底映射', e);
+        if (debugSettlementMap) {
+          console.info('[结算映射] 请求异常 → 使用代码内兜底（非企微数据）');
         }
       }
     })();
@@ -2276,6 +2401,7 @@ export default function App() {
     });
   }, [
     supplyEnv,
+    settlementMapEpoch,
     instanceByProjectId,
     bytedanceSupplyByDate,
     ordersByProjectDatePaas,

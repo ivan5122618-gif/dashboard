@@ -1,8 +1,10 @@
 // 结算套餐ID -> 业务项目ID(=PAAS平台映射 biz) 映射
 // 说明：
 // - Metabase 订单 SQL 会返回 `id`（结算套餐ID），需要把它映射到项目ID后才能聚合出“订单/弹性/总数”
+// - 企微智能表格里同名列「结算套餐ID」即对应 Metabase 的结算套餐 id；「PAAS映射BIZ」为项目 biz id；「服务平台」= PAAS-YL 的行走原力映射
 // - 项目ID/结算套餐ID统一用字符串存储，避免数字/字符串混用导致的匹配失败
 
+/** 企微智能表格拉取失败时的兜底映射（成功拉取后由 applyWecomPaasSettlementMap 全量替换） */
 const SETTLEMENT_ID_TO_PROJECT_IDS = {
   // 你提供的这几行 biz 为空：先不强行映射，交给下游逻辑按“无映射 => 不计入任何项目”
   SPH04LU7: [],
@@ -56,11 +58,79 @@ const YUANLI_SETTLEMENT_ID_TO_PROJECT_IDS = {
   SP8VVP0K: ['20'],
 };
 
+/** @type {Record<string, string[]>|null} 非 null 时 PAAS 环境仅以该表为准 */
+let _wecomPaasSettlementMap = null;
+/** @type {Record<string, string[]>|null} 非 null 时原力环境仅以该表为准 */
+let _wecomYuanliSettlementMap = null;
+
 function getSettlementMap(env) {
   if (env === SUPPLY_ENV_YUANLI) {
+    if (_wecomYuanliSettlementMap) {
+      return { ..._wecomYuanliSettlementMap };
+    }
     return { ...YUANLI_SETTLEMENT_ID_TO_PROJECT_IDS };
   }
+  if (_wecomPaasSettlementMap) {
+    return { ..._wecomPaasSettlementMap };
+  }
   return SETTLEMENT_ID_TO_PROJECT_IDS;
+}
+
+function normalizeSettlementMap(map) {
+  const out = {};
+  if (!map || typeof map !== 'object') return out;
+  for (const [k, v] of Object.entries(map)) {
+    const sid = normalizeId(k);
+    if (!sid) continue;
+    const arr = Array.isArray(v) ? v : v == null ? [] : [v];
+    out[sid] = [...new Set(arr.map(normalizeId).filter(Boolean))];
+  }
+  return out;
+}
+
+function clearPaasDerivedCaches() {
+  delete _projectIdToSettlementIdsByEnv[SUPPLY_ENV_PAAS];
+  delete _supplyCardMergeRegistryByEnv[SUPPLY_ENV_PAAS];
+}
+
+function clearYuanliDerivedCaches() {
+  delete _projectIdToSettlementIdsByEnv[SUPPLY_ENV_YUANLI];
+  delete _supplyCardMergeRegistryByEnv[SUPPLY_ENV_YUANLI];
+}
+
+/**
+ * 一次应用企微返回的 PAAS + 原力两套映射（全量覆盖各自环境）。
+ * @param {{ paas?: Record<string, string[]|string>, yuanli?: Record<string, string[]|string> }} bundle
+ */
+export function applyWecomSettlementMaps(bundle) {
+  if (!bundle || typeof bundle !== 'object') return;
+  if (bundle.paas != null && typeof bundle.paas === 'object') {
+    _wecomPaasSettlementMap = normalizeSettlementMap(bundle.paas);
+    clearPaasDerivedCaches();
+  }
+  if (bundle.yuanli != null && typeof bundle.yuanli === 'object') {
+    _wecomYuanliSettlementMap = normalizeSettlementMap(bundle.yuanli);
+    clearYuanliDerivedCaches();
+  }
+}
+
+/**
+ * 仅更新 PAAS 映射（兼容旧调用）。
+ * @param {Record<string, string[]|string>} map
+ */
+export function applyWecomPaasSettlementMap(map) {
+  applyWecomSettlementMaps({ paas: map });
+}
+
+/** 测试或需要恢复兜底映射时 */
+export function resetWecomPaasSettlementMapToFallback() {
+  _wecomPaasSettlementMap = null;
+  clearPaasDerivedCaches();
+}
+
+export function resetWecomYuanliSettlementMapToFallback() {
+  _wecomYuanliSettlementMap = null;
+  clearYuanliDerivedCaches();
 }
 
 function normalizeId(id) {
