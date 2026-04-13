@@ -58,6 +58,12 @@ function yuanliMetabaseFetchProxy(origin) {
           headers.set(key, val)
         }
       }
+      // 某些 Metabase 部署只认 Cookie，不认 X-Metabase-Session
+      const sessionFromHeader =
+        String(req.headers['x-metabase-session'] || req.headers['X-Metabase-Session'] || '').trim()
+      if (sessionFromHeader) {
+        headers.set('cookie', `metabase.SESSION=${sessionFromHeader}`)
+      }
       headers.set('host', upstreamHost)
       headers.set('accept-encoding', 'identity')
 

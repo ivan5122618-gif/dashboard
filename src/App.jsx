@@ -86,6 +86,8 @@ let yuanliMetabaseSessionId =
     ? ''
     : String(import.meta.env.VITE_YUANLI_METABASE_SESSION_TOKEN || '').trim();
 let yuanliMetabaseLoginPromise = null;
+let yuanliAuthWarnedAt = 0;
+const EMPTY_NATIVE_DATASET = { data: { cols: [], rows: [] } };
 
 function metabaseApiPrefix(audience) {
   if (audience === SUPPLY_ENV_YUANLI) {
@@ -103,25 +105,43 @@ async function refreshMetabaseSessionViaLogin(audience = SUPPLY_ENV_PAAS) {
     }
     if (yuanliMetabaseLoginPromise) return yuanliMetabaseLoginPromise;
     yuanliMetabaseLoginPromise = (async () => {
-      const res = await fetch(`${metabaseApiPrefix(SUPPLY_ENV_YUANLI)}/api/session`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: yuanliMetabaseUser, password: yuanliMetabasePass }),
-      });
-      const text = await res.text().catch(() => '');
-      if (!res.ok) {
-        throw new Error(`原力 Metabase 登录失败 ${res.status}: ${text.slice(0, 500)}`);
+      const loginPairs = [
+        { username: yuanliMetabaseUser, password: yuanliMetabasePass, tag: 'yuanli-env' },
+      ];
+      if (metabaseUser && metabaseUser !== yuanliMetabaseUser) {
+        loginPairs.push({ username: metabaseUser, password: yuanliMetabasePass, tag: 'fallback-email' });
       }
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        throw new Error(`原力 Metabase 登录响应非 JSON: ${text.slice(0, 200)}`);
+
+      let lastError = '未知错误';
+      for (const pair of loginPairs) {
+        const res = await fetch(`${metabaseApiPrefix(SUPPLY_ENV_YUANLI)}/api/session`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: pair.username, password: pair.password }),
+        });
+        const text = await res.text().catch(() => '');
+        if (!res.ok) {
+          lastError = `${res.status}: ${text.slice(0, 500)}`;
+          continue;
+        }
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          throw new Error(`原力 Metabase 登录响应非 JSON: ${text.slice(0, 200)}`);
+        }
+        const id = data?.id;
+        if (!id) {
+          lastError = '登录成功但未返回 session id';
+          continue;
+        }
+        if (pair.tag !== 'yuanli-env') {
+          console.info('[原力登录] 已自动回退使用邮箱登录名');
+        }
+        yuanliMetabaseSessionId = String(id);
+        return yuanliMetabaseSessionId;
       }
-      const id = data?.id;
-      if (!id) throw new Error('原力 Metabase 登录未返回 session id');
-      yuanliMetabaseSessionId = String(id);
-      return yuanliMetabaseSessionId;
+      throw new Error(`原力 Metabase 登录失败: ${lastError}`);
     })();
     try {
       return await yuanliMetabaseLoginPromise;
@@ -216,6 +236,14 @@ async function queryMetabaseNative({ database, query, audience = SUPPLY_ENV_PAAS
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
+    if (audience === SUPPLY_ENV_YUANLI && res.status === 401) {
+      const now = Date.now();
+      if (now - yuanliAuthWarnedAt > 30000) {
+        yuanliAuthWarnedAt = now;
+        console.warn('[原力供应] 鉴权失败，已降级为空数据。请检查原力账号/密码或 session。');
+      }
+      return EMPTY_NATIVE_DATASET;
+    }
     const hint401 =
       res.status === 401 && !hasPasswordLogin
         ? '（401：请在 .env 配置 VITE_METABASE_SESSION_TOKEN 或 VITE_METABASE_USERNAME + VITE_METABASE_PASSWORD；原力同理 VITE_YUANLI_*）'
@@ -2228,6 +2256,8 @@ export default function App() {
   // 原力环境供应（biz_type + inc 表）
   useEffect(() => {
     if (!useApi) return;
+    // 仅在切到「原力」标签时请求，避免 PAAS 场景下无意义的 401 噪音
+    if (supplyEnv !== SUPPLY_ENV_YUANLI) return;
     if (!YUANLI_SUPPLY_7D_SQL?.trim()) {
       setSupplyYuanliByProjectId({});
       return;
@@ -2250,7 +2280,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [useApi, supplyEnv]);
 
   // 供应看板：按环境与数据源合并卡片（订单就绪即可先出卡；vmid/原力 CH 未到则用空 map，供应数字与曲线稍后补齐）
   useEffect(() => {
