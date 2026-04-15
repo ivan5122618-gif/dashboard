@@ -1,4 +1,12 @@
-import React, { useEffect, useMemo, useRef, useState, startTransition } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+  memo,
+} from 'react';
 import {
   LineChart,
   Line,
@@ -918,7 +926,7 @@ const TrendBadge = ({ value, isPositive = true }) => (
   </span>
 );
 
-const FilterBar = ({ projects, selectedProjectIds, setSelectedProjectIds, loading = false }) => {
+const FilterBar = memo(function FilterBar({ projects, selectedProjectIds, setSelectedProjectIds, loading = false }) {
   const [keyword, setKeyword] = useState('');
   const [open, setOpen] = useState(false);
 
@@ -1022,7 +1030,199 @@ const FilterBar = ({ projects, selectedProjectIds, setSelectedProjectIds, loadin
       )}
     </div>
   );
-};
+});
+
+const SUPPLY_CARD_ACCENT_PALETTES = [
+  { border: 'border-slate-200', chip: 'bg-black text-white', chart: '#000000' },
+  { border: 'border-slate-200', chip: 'bg-white text-black border border-slate-200', chart: '#000000' },
+  { border: 'border-slate-200', chip: 'bg-black text-white', chart: '#000000' },
+  { border: 'border-slate-200', chip: 'bg-white text-black border border-slate-200', chart: '#000000' },
+  { border: 'border-slate-200', chip: 'bg-black text-white', chart: '#000000' },
+];
+
+const SupplyProjectCard = memo(function SupplyProjectCard({
+  proj,
+  isExpanded,
+  onToggle,
+  useApiProp,
+  supplyFetchPending,
+}) {
+  const hasSupplyNum = typeof proj.supply === 'number' && Number.isFinite(proj.supply);
+  const vmidStillLoading = useApiProp && supplyFetchPending && !hasSupplyNum;
+  const chartAwaitingSeries =
+    vmidStillLoading && (!Array.isArray(proj.trend) || proj.trend.length === 0);
+  const marginPct =
+    hasSupplyNum && typeof proj.order === 'number' && proj.order > 0
+      ? ((proj.supply - proj.order) / proj.order) * 100
+      : 0;
+  const redundancyAlertCard = marginPct > 5 || marginPct < 0;
+  const values = Array.isArray(proj.trend) ? proj.trend.map((d) => d.value) : [];
+  const current = values.length ? values[values.length - 1] : 0;
+  const max = values.length ? Math.max(...values) : 0;
+  const min = values.length ? Math.min(...values) : 0;
+
+  const fmtPct = (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+  const tone = (v) => {
+    const bad = v > 5 || v < 0;
+    return bad ? 'text-rose-600' : 'text-emerald-600';
+  };
+  const pillBg = (v) => {
+    const bad = v > 5 || v < 0;
+    return bad ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600';
+  };
+  const marginChipClass = redundancyAlertCard
+    ? 'bg-rose-50 text-rose-700'
+    : 'bg-emerald-50 text-emerald-700';
+  const paletteSeed =
+    Number(proj.mergedProjectIds?.[0] ?? String(proj.id).split('+')[0]) || 0;
+  const palette =
+    SUPPLY_CARD_ACCENT_PALETTES[Math.abs(paletteSeed) % SUPPLY_CARD_ACCENT_PALETTES.length] ||
+    SUPPLY_CARD_ACCENT_PALETTES[0];
+
+  return (
+    <Card
+      className={`p-4 flex flex-col hover:shadow-md transition-shadow contain-layout [content-visibility:auto] ${palette.border}`}
+    >
+      <div className="flex justify-between items-start mb-4">
+        <div>
+          <h3 className="text-base font-bold text-slate-800">{proj.name}</h3>
+          <p className="text-xs text-slate-400 mt-0.5">{proj.sub || `项目 ID ${proj.id}`}</p>
+        </div>
+        <div className="text-right">
+          <span className={`text-xs px-2 py-1 rounded font-medium ${marginChipClass}`}>
+            冗余 {fmtPct(marginPct)}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex items-baseline gap-2 flex-wrap mb-4 text-sm text-slate-600">
+        <span className="text-slate-500">{proj.unit === '卡' ? '峰值（卡）' : '峰值（路）'}</span>
+        {proj.supplyHeadlineDate ? (
+          <span className="text-slate-400 tabular-nums">{proj.supplyHeadlineDate}</span>
+        ) : null}
+        <strong className="text-slate-900 text-lg tabular-nums inline-flex items-center gap-1.5">
+          {hasSupplyNum ? (
+            proj.supply
+          ) : vmidStillLoading ? (
+            <>
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-500" aria-hidden />
+              <span className="text-slate-400 font-semibold">—</span>
+            </>
+          ) : (
+            '—'
+          )}
+        </strong>
+        <span className="text-slate-300">|</span>
+        <span className="text-slate-500">订单</span>
+        <strong className="text-slate-900 text-lg tabular-nums">{proj.order}</strong>
+      </div>
+
+      <div className="h-28 w-full mb-4">
+        <div className="flex justify-between text-xs text-slate-400 mb-1">
+          <span className="inline-flex items-center gap-1">
+            近7天冗余率 (%)
+            {useApiProp && supplyFetchPending ? (
+              <Loader2 className="h-3 w-3 animate-spin text-blue-400" aria-hidden />
+            ) : null}
+          </span>
+        </div>
+        {chartAwaitingSeries ? (
+          <div className="flex h-full min-h-[7rem] flex-col items-center justify-center gap-2 rounded-lg border border-slate-100 bg-slate-50/90 text-[11px] text-slate-500">
+            <Loader2 className="h-7 w-7 animate-spin text-blue-500" aria-hidden />
+            <span>曲线随供应数据返回后显示</span>
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+            <LineChart data={proj.trend}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+              <XAxis
+                dataKey="time"
+                tick={{ fontSize: 10, fill: '#94a3b8' }}
+                axisLine={false}
+                tickLine={false}
+                dy={8}
+                minTickGap={18}
+                interval="preserveStartEnd"
+              />
+              <YAxis
+                tick={{ fontSize: 10, fill: '#94a3b8' }}
+                axisLine={false}
+                tickLine={false}
+                dx={-10}
+                width={44}
+                tickFormatter={(v) => `${v.toFixed(0)}%`}
+              />
+              <Tooltip
+                contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                labelStyle={{ color: '#64748b', marginBottom: '4px' }}
+                formatter={(value) => [`${Number(value).toFixed(1)}%`, '冗余率']}
+              />
+              <Line
+                type="monotone"
+                dataKey="value"
+                stroke="#0a72ef"
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      <div className="flex items-center gap-3 text-xs mb-3 flex-wrap">
+        <span className={`px-2 py-0.5 rounded font-medium ${pillBg(current)}`}>当前 {fmtPct(current)}</span>
+        <span className="text-slate-500">
+          高 <strong className={tone(max)}>{fmtPct(max)}</strong>
+        </span>
+        <span className="text-slate-500">
+          低 <strong className={tone(min)}>{fmtPct(min)}</strong>
+        </span>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => onToggle(proj.id)}
+        className="inline-flex items-center gap-1 self-start mb-2 rounded-md bg-white text-[#171717] border border-slate-200 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-slate-50"
+      >
+        {isExpanded ? (
+          <>
+            收起表格 <ChevronUp className="w-4 h-4 ml-0.5" />
+          </>
+        ) : (
+          <>
+            展开表格 <ChevronDown className="w-4 h-4 ml-0.5" />
+          </>
+        )}
+      </button>
+
+      {isExpanded && (
+        <div className="mt-3 pt-3 border-t border-slate-100 overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="text-slate-500">
+                <th className="pb-3 font-medium">日期</th>
+                <th className="pb-3 font-medium">供应最大 ({proj.unit})</th>
+                <th className="pb-3 font-medium">供应平均 ({proj.unit})</th>
+                <th className="pb-3 font-medium">订单 ({proj.unit})</th>
+              </tr>
+            </thead>
+            <tbody className="text-slate-700">
+              {(proj.table || []).map((row, idx) => (
+                <tr key={idx} className="border-t border-slate-50">
+                  <td className="py-3 font-medium">{row.date}</td>
+                  <td className="py-3">{row.max}</td>
+                  <td className="py-3">{row.avg}</td>
+                  <td className="py-3">{row.order}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+});
 
 // --- 视图组件 (Views based on images) ---
 // 1. 供应看板 (Supply Dashboard)
@@ -1035,7 +1235,9 @@ const SupplyView = ({
   yuanliMetabaseConfigured = false,
 }) => {
   const [expanded, setExpanded] = useState({});
-  const toggleExpand = (id) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  const toggleExpand = useCallback((id) => {
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
 
   const list =
     Array.isArray(projectsToShow) && projectsToShow.length > 0
@@ -1050,14 +1252,6 @@ const SupplyView = ({
   /** 与卡片一致：冗余率 >5% 或供应低于订单（负数）标红，否则标绿 */
   const overviewRedundancyAlert = redundancyRatio > 5 || redundancyRatio < 0;
 
-  const accentPalettes = [
-    { border: 'border-indigo-200', chip: 'bg-indigo-50 text-indigo-700', chart: '#4f46e5' },
-    { border: 'border-emerald-200', chip: 'bg-emerald-50 text-emerald-700', chart: '#059669' },
-    { border: 'border-sky-200', chip: 'bg-sky-50 text-sky-700', chart: '#0284c7' },
-    { border: 'border-rose-200', chip: 'bg-rose-50 text-rose-700', chart: '#e11d48' },
-    { border: 'border-amber-200', chip: 'bg-amber-50 text-amber-700', chart: '#d97706' },
-  ];
-
   const onEnv = typeof setSupplyEnv === 'function' ? setSupplyEnv : () => {};
 
   return (
@@ -1066,10 +1260,10 @@ const SupplyView = ({
         <button
           type="button"
           onClick={() => onEnv(SUPPLY_ENV_PAAS)}
-          className={`rounded-lg px-4 py-2 text-sm font-medium border transition-colors ${
+          className={`rounded-full px-4 py-2 text-sm font-medium border transition-colors ${
             supplyEnv === SUPPLY_ENV_PAAS
-              ? 'border-blue-200 bg-blue-50 text-blue-800 shadow-sm'
-              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+              ? 'bg-[#171717] text-white'
+              : 'bg-white text-[#171717] border-slate-200 hover:bg-slate-50'
           }`}
         >
           自建 PAAS
@@ -1077,10 +1271,10 @@ const SupplyView = ({
         <button
           type="button"
           onClick={() => onEnv(SUPPLY_ENV_YUANLI)}
-          className={`rounded-lg px-4 py-2 text-sm font-medium border transition-colors ${
+          className={`rounded-full px-4 py-2 text-sm font-medium border transition-colors ${
             supplyEnv === SUPPLY_ENV_YUANLI
-              ? 'border-blue-200 bg-blue-50 text-blue-800 shadow-sm'
-              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+              ? 'bg-[#171717] text-white'
+              : 'bg-white text-[#171717] border-slate-200 hover:bg-slate-50'
           }`}
         >
           原力环境
@@ -1088,8 +1282,8 @@ const SupplyView = ({
       </div>
 
       {useApiProp && supplyFetchPending && (
-        <div className="flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-slate-600">
-          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-600" aria-hidden />
+        <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-black" aria-hidden />
           <span>近 7 天 Metabase 取数中，订单会先出、供应峰值与曲线随后补齐。</span>
         </div>
       )}
@@ -1195,184 +1389,16 @@ const SupplyView = ({
             </div>
           </Card>
         ) : null}
-        {list.map((proj) => {
-          const hasSupplyNum = typeof proj.supply === 'number' && Number.isFinite(proj.supply);
-          const vmidStillLoading = useApiProp && supplyFetchPending && !hasSupplyNum;
-          const chartAwaitingSeries =
-            vmidStillLoading && (!Array.isArray(proj.trend) || proj.trend.length === 0);
-          const marginPct =
-            hasSupplyNum && typeof proj.order === 'number' && proj.order > 0
-              ? ((proj.supply - proj.order) / proj.order) * 100
-              : 0;
-          const redundancyAlertCard = marginPct > 5 || marginPct < 0;
-          const values = Array.isArray(proj.trend) ? proj.trend.map((d) => d.value) : [];
-          const current = values.length ? values[values.length - 1] : 0;
-          const max = values.length ? Math.max(...values) : 0;
-          const min = values.length ? Math.min(...values) : 0;
-
-          const fmtPct = (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
-          const tone = (v) => {
-            const bad = v > 5 || v < 0;
-            return bad ? 'text-rose-600' : 'text-emerald-600';
-          };
-          const pillBg = (v) => {
-            const bad = v > 5 || v < 0;
-            return bad ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600';
-          };
-          const marginChipClass = redundancyAlertCard
-            ? 'bg-rose-50 text-rose-700'
-            : 'bg-emerald-50 text-emerald-700';
-          const paletteSeed =
-            Number(proj.mergedProjectIds?.[0] ?? String(proj.id).split('+')[0]) || 0;
-          const palette =
-            accentPalettes[Math.abs(paletteSeed) % accentPalettes.length] || accentPalettes[0];
-
-          return (
-          <Card
+        {list.map((proj) => (
+          <SupplyProjectCard
             key={proj.id}
-            className={`p-4 flex flex-col hover:shadow-md transition-shadow ${palette.border}`}
-          >
-            <div className="flex justify-between items-start mb-4">
-              <div>
-                <h3 className="text-base font-bold text-slate-800">{proj.name}</h3>
-                <p className="text-xs text-slate-400 mt-0.5">{proj.sub || `项目 ID ${proj.id}`}</p>
-              </div>
-              <div className="text-right">
-                <span className={`text-xs px-2 py-1 rounded font-medium ${marginChipClass}`}>
-                  冗余 {fmtPct(marginPct)}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-baseline gap-2 flex-wrap mb-4 text-sm text-slate-600">
-              <span className="text-slate-500">{proj.unit === '卡' ? '峰值（卡）' : '峰值（路）'}</span>
-              {proj.supplyHeadlineDate ? (
-                <span className="text-slate-400 tabular-nums">{proj.supplyHeadlineDate}</span>
-              ) : null}
-              <strong className="text-slate-900 text-lg tabular-nums inline-flex items-center gap-1.5">
-                {hasSupplyNum ? (
-                  proj.supply
-                ) : vmidStillLoading ? (
-                  <>
-                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-500" aria-hidden />
-                    <span className="text-slate-400 font-semibold">—</span>
-                  </>
-                ) : (
-                  '—'
-                )}
-              </strong>
-              <span className="text-slate-300">|</span>
-              <span className="text-slate-500">订单</span>
-              <strong className="text-slate-900 text-lg tabular-nums">{proj.order}</strong>
-            </div>
-
-            <div className="h-28 w-full mb-4">
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span className="inline-flex items-center gap-1">
-                  近7天冗余率 (%)
-                  {useApiProp && supplyFetchPending ? (
-                    <Loader2 className="h-3 w-3 animate-spin text-blue-400" aria-hidden />
-                  ) : null}
-                </span>
-              </div>
-              {chartAwaitingSeries ? (
-                <div className="flex h-full min-h-[7rem] flex-col items-center justify-center gap-2 rounded-lg border border-slate-100 bg-slate-50/90 text-[11px] text-slate-500">
-                  <Loader2 className="h-7 w-7 animate-spin text-blue-500" aria-hidden />
-                  <span>曲线随供应数据返回后显示</span>
-                </div>
-              ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={proj.trend}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                    <XAxis
-                      dataKey="time"
-                      tick={{ fontSize: 10, fill: '#94a3b8' }}
-                      axisLine={false}
-                      tickLine={false}
-                      dy={8}
-                      minTickGap={18}
-                      interval="preserveStartEnd"
-                    />
-                    <YAxis
-                      tick={{ fontSize: 10, fill: '#94a3b8' }}
-                      axisLine={false}
-                      tickLine={false}
-                      dx={-10}
-                      width={44}
-                      tickFormatter={(v) => `${v.toFixed(0)}%`}
-                    />
-                    <Tooltip
-                      contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                      labelStyle={{ color: '#64748b', marginBottom: '4px' }}
-                      formatter={(value) => [`${Number(value).toFixed(1)}%`, '冗余率']}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="value"
-                      stroke="#0ea5e9"
-                      strokeWidth={2}
-                      dot={false}
-                      isAnimationActive={false}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-
-            <div className="flex items-center gap-3 text-xs mb-3 flex-wrap">
-              <span className={`px-2 py-0.5 rounded font-medium ${pillBg(current)}`}>
-                当前 {fmtPct(current)}
-              </span>
-              <span className="text-slate-500">
-                高 <strong className={tone(max)}>{fmtPct(max)}</strong>
-              </span>
-              <span className="text-slate-500">
-                低 <strong className={tone(min)}>{fmtPct(min)}</strong>
-              </span>
-            </div>
-
-            <button
-              onClick={() => toggleExpand(proj.id)}
-              className="text-blue-500 hover:text-blue-600 text-sm font-medium flex items-center transition-colors self-start mb-2"
-            >
-              {expanded[proj.id] ? (
-                <>
-                  收起表格 <ChevronUp className="w-4 h-4 ml-0.5" />
-                </>
-              ) : (
-                <>
-                  展开表格 <ChevronDown className="w-4 h-4 ml-0.5" />
-                </>
-              )}
-            </button>
-
-            {expanded[proj.id] && (
-              <div className="mt-3 pt-3 border-t border-slate-100 overflow-x-auto animate-in slide-in-from-top-2 fade-in duration-200">
-                <table className="w-full text-left text-sm">
-                  <thead>
-                    <tr className="text-slate-500">
-                      <th className="pb-3 font-medium">日期</th>
-                      <th className="pb-3 font-medium">供应最大 ({proj.unit})</th>
-                      <th className="pb-3 font-medium">供应平均 ({proj.unit})</th>
-                      <th className="pb-3 font-medium">订单 ({proj.unit})</th>
-                    </tr>
-                  </thead>
-                  <tbody className="text-slate-700">
-                    {(proj.table || []).map((row, idx) => (
-                      <tr key={idx} className="border-t border-slate-50">
-                        <td className="py-3 font-medium">{row.date}</td>
-                        <td className="py-3">{row.max}</td>
-                        <td className="py-3">{row.avg}</td>
-                        <td className="py-3">{row.order}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </Card>
-          );
-          })}
+            proj={proj}
+            isExpanded={!!expanded[proj.id]}
+            onToggle={toggleExpand}
+            useApiProp={useApiProp}
+            supplyFetchPending={supplyFetchPending}
+          />
+        ))}
       </div>
     </div>
   );
@@ -1407,8 +1433,8 @@ const SchedulingView = () => (
             <AreaChart data={queueData} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
               <defs>
                 <linearGradient id="colorUsers" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0} />
+                  <stop offset="5%" stopColor="#000000" stopOpacity={0.22} />
+                  <stop offset="95%" stopColor="#000000" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
@@ -1429,7 +1455,7 @@ const SchedulingView = () => (
                 }}
                 labelStyle={{ color: '#64748b', marginBottom: '4px' }}
               />
-              <Area type="monotone" dataKey="users" stroke="#8b5cf6" strokeWidth={3} fillOpacity={1} fill="url(#colorUsers)" />
+              <Area type="monotone" dataKey="users" stroke="#0a72ef" strokeWidth={2.5} fillOpacity={1} fill="url(#colorUsers)" />
             </AreaChart>
           </ResponsiveContainer>
         </div>
@@ -1468,11 +1494,11 @@ const CloudTaskView = () => (
             <AreaChart data={cloudTaskTrend}>
               <defs>
                 <linearGradient id="colorCloud" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#10b981" stopOpacity={0.2} />
-                  <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                  <stop offset="5%" stopColor="#000000" stopOpacity={0.22} />
+                  <stop offset="95%" stopColor="#000000" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <Area type="monotone" dataKey="value" stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorCloud)" />
+              <Area type="monotone" dataKey="value" stroke="#0a72ef" strokeWidth={2.5} fillOpacity={1} fill="url(#colorCloud)" />
             </AreaChart>
           </ResponsiveContainer>
         </div>
@@ -1481,14 +1507,158 @@ const CloudTaskView = () => (
   </div>
 );
 
+const InstanceProjectCard = memo(function InstanceProjectCard({ proj, rank, isExpanded, onToggle }) {
+  return (
+    <Card className="p-3 border border-slate-200 flex flex-col contain-layout [content-visibility:auto]">
+      <div className="flex justify-between items-start mb-4">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="bg-slate-900 text-white font-bold px-2.5 py-1 rounded-full text-sm shrink-0">
+            #{rank}
+          </span>
+          <span className="font-bold text-slate-800 text-lg truncate">{proj.name}</span>
+        </div>
+        <div className="text-right">
+          <p className="text-xs text-slate-400">7 天波幅</p>
+          <p className="font-bold text-emerald-500">{proj.volatility}</p>
+        </div>
+      </div>
+
+      <p className="text-xs text-slate-500 mb-2">项目 ID {proj.id}</p>
+
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        <div className="bg-slate-50 border border-slate-100 rounded-lg px-2 py-2 text-center">
+          <p className="text-[11px] font-bold text-slate-500">可用数</p>
+          <p className="text-[12px] font-black text-slate-900">
+            {typeof proj.currentHealthValue === 'number' ? proj.currentHealthValue.toFixed(0) : '—'}
+          </p>
+        </div>
+        <div className="bg-slate-50 border border-slate-100 rounded-lg px-2 py-2 text-center">
+          <p className="text-[11px] font-bold text-slate-500">总数</p>
+          <p className="text-[12px] font-black text-slate-900">
+            {typeof proj.currentTotalValue === 'number' ? proj.currentTotalValue.toFixed(0) : '—'}
+          </p>
+        </div>
+        <div className="bg-slate-50 border border-slate-100 rounded-lg px-2 py-2 text-center">
+          <p className="text-[11px] font-bold text-slate-500">可用率</p>
+          <p className="text-[12px] font-black text-emerald-600">{proj.avail}</p>
+        </div>
+      </div>
+
+      <div className="h-28 w-full mb-3 overflow-visible">
+        <p className="text-xs text-slate-400 mb-1">近 7 天可用率</p>
+        <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+          <LineChart data={proj.trend} margin={{ top: 0, right: 4, left: 2, bottom: 10 }}>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+            <XAxis
+              dataKey="time"
+              tick={{ fontSize: 10, fill: '#64748b' }}
+              axisLine={false}
+              tickLine={false}
+              dy={4}
+              minTickGap={0}
+              interval={0}
+              tickMargin={6}
+            />
+            <YAxis
+              tick={{ fontSize: 10, fill: '#64748b' }}
+              axisLine={false}
+              tickLine={false}
+              width={36}
+              dx={0}
+              tickFormatter={(v) => `${Number(v).toFixed(0)}%`}
+            />
+            <Tooltip
+              formatter={(value) => [`${Number(value).toFixed(1)}%`, '可用率']}
+              contentStyle={{
+                borderRadius: '8px',
+                border: 'none',
+                boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
+                background: 'white',
+              }}
+              labelStyle={{ color: '#334155' }}
+            />
+            <Line
+              type="monotone"
+              dataKey="value"
+              stroke="#0a72ef"
+              strokeWidth={2}
+              dot={false}
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="flex items-center gap-3 text-sm mb-3">
+        <span className="text-slate-500">
+          高 <strong className="text-emerald-500">{proj.high}</strong>
+        </span>
+        <span className="text-slate-500">
+          低 <strong className="text-rose-500">{proj.low}</strong>
+        </span>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => onToggle(proj.id)}
+        className="inline-flex items-center gap-1 self-start mb-2 rounded-md bg-white text-[#171717] border border-slate-200 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-slate-50"
+      >
+        {isExpanded ? (
+          <>
+            收起按日明细 <ChevronUp className="w-4 h-4 ml-0.5" />
+          </>
+        ) : (
+          <>
+            展开按日明细 <ChevronDown className="w-4 h-4 ml-0.5" />
+          </>
+        )}
+      </button>
+
+      {isExpanded && (
+        <div className="mt-3 pt-3 border-t border-slate-100 overflow-x-auto">
+          <table className="w-full table-fixed text-left text-sm">
+            <thead>
+              <tr className="text-slate-500 border-b border-slate-100">
+                <th className="pb-2 px-2 font-medium w-1/4">日期</th>
+                <th className="pb-2 px-2 font-medium text-right w-1/4">可用率 (%)</th>
+                <th className="pb-2 px-2 font-medium text-right w-1/4">健康实例数</th>
+                <th className="pb-2 px-2 font-medium text-right w-1/4">总门路数</th>
+              </tr>
+            </thead>
+            <tbody className="text-slate-700">
+              {proj.table.map((row, idx) => (
+                <tr
+                  key={idx}
+                  className="border-b border-slate-100 last:border-0 hover:bg-slate-50/40 transition-colors"
+                >
+                  <td className="py-2.5 px-2 font-medium whitespace-nowrap">{row.date}</td>
+                  <td className="py-2.5 px-2 text-right tabular-nums whitespace-nowrap">{row.avail}</td>
+                  <td className="py-2.5 px-2 text-right tabular-nums whitespace-nowrap">{row.health}</td>
+                  <td className="py-2.5 px-2 text-right tabular-nums whitespace-nowrap">{row.total}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+});
+
 // 4. 实例任务 (Instance Tasks)
 const InstanceView = ({ projectsToShow, instanceByProjectId, loading = false }) => {
   const [expanded, setExpanded] = useState({});
-  const toggleExpand = (id) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  const toggleExpand = useCallback((id) => {
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
 
-  const list = Array.isArray(projectsToShow) && projectsToShow.length > 0 ? projectsToShow : projects;
+  const list = useMemo(
+    () => (Array.isArray(projectsToShow) && projectsToShow.length > 0 ? projectsToShow : projects),
+    [projectsToShow],
+  );
 
-  const instanceProjects = list
+  const instanceProjects = useMemo(() => {
+    return list
     .map((proj) => {
       const override = instanceByProjectId && instanceByProjectId[String(proj.id)];
       if (override) return override;
@@ -1559,8 +1729,9 @@ const InstanceView = ({ projectsToShow, instanceByProjectId, loading = false }) 
       const bn = Number.isFinite(bNum) ? bNum : -Infinity;
       return bn - an;
     });
+  }, [list, instanceByProjectId]);
 
-  const overallAvailabilitySeries = (() => {
+  const overallAvailabilitySeries = useMemo(() => {
     if (!instanceProjects.length) return overallAvailability;
     const hasTrend = instanceProjects.every((p) => Array.isArray(p.trend) && p.trend.length > 0);
     if (!hasTrend) return overallAvailability;
@@ -1598,7 +1769,7 @@ const InstanceView = ({ projectsToShow, instanceByProjectId, loading = false }) 
       }
       return { time: rec.time, value: rec.count ? rec.sumPct / rec.count : 0 };
     });
-  })();
+  }, [instanceProjects]);
 
   const avgAvailPct = overallAvailabilitySeries.length
     ? Number(overallAvailabilitySeries[overallAvailabilitySeries.length - 1].value) || 0
@@ -1651,12 +1822,12 @@ const InstanceView = ({ projectsToShow, instanceByProjectId, loading = false }) 
             </span>
           </div>
           <div className="h-24 w-full">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
               <AreaChart data={overallAvailabilitySeries}>
                 <defs>
                   <linearGradient id="colorAvail" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#0ea5e9" stopOpacity={0} />
+                    <stop offset="5%" stopColor="#000000" stopOpacity={0.22} />
+                    <stop offset="95%" stopColor="#000000" stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
@@ -1683,7 +1854,7 @@ const InstanceView = ({ projectsToShow, instanceByProjectId, loading = false }) 
                 <Area
                   type="monotone"
                   dataKey="value"
-                  stroke="#0ea5e9"
+                  stroke="#0a72ef"
                   strokeWidth={2.5}
                   dot={false}
                   isAnimationActive={false}
@@ -1728,148 +1899,49 @@ const InstanceView = ({ projectsToShow, instanceByProjectId, loading = false }) 
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {instanceProjects.map((proj, i) => (
-          <Card key={proj.id} className="p-3 border border-slate-200 flex flex-col">
-            <div className="flex justify-between items-start mb-4">
-              <div className="flex items-center gap-3 min-w-0">
-                <span className="bg-slate-900 text-white font-bold px-2.5 py-1 rounded-full text-sm shrink-0">#{i + 1}</span>
-                <span className="font-bold text-slate-800 text-lg truncate">{proj.name}</span>
-              </div>
-              <div className="text-right">
-                <p className="text-xs text-slate-400">7 天波幅</p>
-                <p className="font-bold text-emerald-500">{proj.volatility}</p>
-              </div>
-            </div>
-
-            <p className="text-xs text-slate-500 mb-2">项目 ID {proj.id}</p>
-
-            <div className="grid grid-cols-3 gap-2 mb-3">
-              <div className="bg-slate-50 border border-slate-100 rounded-lg px-2 py-2 text-center">
-                <p className="text-[11px] font-bold text-slate-500">可用数</p>
-                <p className="text-[12px] font-black text-slate-900">
-                  {typeof proj.currentHealthValue === 'number' ? proj.currentHealthValue.toFixed(0) : '—'}
-                </p>
-              </div>
-              <div className="bg-slate-50 border border-slate-100 rounded-lg px-2 py-2 text-center">
-                <p className="text-[11px] font-bold text-slate-500">总数</p>
-                <p className="text-[12px] font-black text-slate-900">
-                  {typeof proj.currentTotalValue === 'number' ? proj.currentTotalValue.toFixed(0) : '—'}
-                </p>
-              </div>
-              <div className="bg-slate-50 border border-slate-100 rounded-lg px-2 py-2 text-center">
-                <p className="text-[11px] font-bold text-slate-500">可用率</p>
-                <p className="text-[12px] font-black text-emerald-600">
-                  {proj.avail}
-                </p>
-              </div>
-            </div>
-
-            <div className="h-28 w-full mb-3 overflow-visible">
-              <p className="text-xs text-slate-400 mb-1">近 7 天可用率</p>
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={proj.trend} margin={{ top: 0, right: 4, left: 2, bottom: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis
-                    dataKey="time"
-                    tick={{ fontSize: 10, fill: '#64748b' }}
-                    axisLine={false}
-                    tickLine={false}
-                    dy={4}
-                    minTickGap={0}
-                    interval={0}
-                    tickMargin={6}
-                  />
-                  <YAxis
-                    tick={{ fontSize: 10, fill: '#64748b' }}
-                    axisLine={false}
-                    tickLine={false}
-                    width={36}
-                    dx={0}
-                    tickFormatter={(v) => `${Number(v).toFixed(0)}%`}
-                  />
-                  <Tooltip
-                    formatter={(value) => [`${Number(value).toFixed(1)}%`, '可用率']}
-                    contentStyle={{
-                      borderRadius: '8px',
-                      border: 'none',
-                      boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
-                      background: 'white',
-                    }}
-                    labelStyle={{ color: '#334155' }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="value"
-                    stroke="#0ea5e9"
-                    strokeWidth={2}
-                    dot={false}
-                    isAnimationActive={false}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="flex items-center gap-3 text-sm mb-4">
-              <span className="text-slate-500">
-                高 <strong className="text-emerald-500">{proj.high}</strong>
-              </span>
-              <span className="text-slate-500">
-                低 <strong className="text-rose-500">{proj.low}</strong>
-              </span>
-            </div>
-
-            <div className="border-t border-slate-100 pt-3 mt-auto">
-              <div className="flex justify-end">
-                <button
-                  onClick={() => toggleExpand(proj.id)}
-                  className="text-slate-500 hover:text-slate-800 text-xs font-medium flex items-center transition-colors"
-                >
-                  {expanded[proj.id] ? (
-                    <>
-                      收起按日明细 <ChevronUp className="w-3 h-3 ml-0.5" />
-                    </>
-                  ) : (
-                    <>
-                      展开按日明细 <ChevronDown className="w-3 h-3 ml-0.5" />
-                    </>
-                  )}
-                </button>
-              </div>
-
-              {expanded[proj.id] && (
-                <div className="mt-4 overflow-x-auto animate-in slide-in-from-top-2 fade-in duration-200">
-                  <table className="w-full text-left text-sm">
-                    <thead>
-                      <tr className="text-slate-500 border-b border-slate-100">
-                        <th className="pb-3 font-medium">日期 (月日)</th>
-                        <th className="pb-3 font-medium text-right">实例可用率 (%)</th>
-                        <th className="pb-3 font-medium text-right">健康实例数</th>
-                        <th className="pb-3 font-medium text-right">总门路数</th>
-                      </tr>
-                    </thead>
-                    <tbody className="text-slate-700">
-                      {proj.table.map((row, idx) => (
-                        <tr key={idx} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors">
-                          <td className="py-3 font-medium">{row.date}</td>
-                          <td className="py-3 text-right">{row.avail}</td>
-                          <td className="py-3 text-right">{row.health}</td>
-                          <td className="py-3 text-right">{row.total}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </Card>
+          <InstanceProjectCard
+            key={proj.id}
+            proj={proj}
+            rank={i + 1}
+            isExpanded={!!expanded[proj.id]}
+            onToggle={toggleExpand}
+          />
         ))}
       </div>
     </div>
   );
 };
 
+function TabPanelLoading({ tabLabel }) {
+  return (
+    <div
+      className="flex min-h-[min(18rem,46vh)] w-full flex-col items-center justify-center gap-3 rounded-xl border border-slate-200 bg-white shadow-sm px-6 py-12"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <Loader2 className="h-10 w-10 animate-spin text-[#0a72ef]" aria-hidden />
+      <p className="text-sm font-medium text-slate-600">正在加载「{tabLabel}」…</p>
+      <p className="text-xs text-slate-400">内容较多时稍候即现</p>
+    </div>
+  );
+}
+
 // --- 主应用组件 (Main App Component) ---
 export default function App() {
-  const [activeTab, setActiveTab] = useState('supply');
+  /** 顶部 Tab 立即高亮 */
+  const [tabIndicator, setTabIndicator] = useState('supply');
+  /** 下方面板延后挂载（避免主线程被图表同步阻塞） */
+  const [tabPanel, setTabPanel] = useState('supply');
+  const [isTabTransitionPending, startTabTransition] = useTransition();
+
+  const selectTab = useCallback((id) => {
+    if (id === tabPanel && !isTabTransitionPending) return;
+    setTabIndicator(id);
+    startTabTransition(() => {
+      setTabPanel(id);
+    });
+  }, [tabPanel, isTabTransitionPending]);
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [instanceByProjectId, setInstanceByProjectId] = useState({});
   const [instanceProjectOptions, setInstanceProjectOptions] = useState([]);
@@ -2440,15 +2512,15 @@ export default function App() {
     supplyYuanliByProjectId,
   ]);
 
-  const supplyProjectsToShow =
-    selectedProjectIds.length > 0
-      ? supplyProjects.filter((p) => {
-          const sel = new Set(selectedProjectIds.map(String));
-          if (sel.has(String(p.id))) return true;
-          const members = p.mergedProjectIds || projectIdsForSupplyCardId(p.id, supplyEnv);
-          return members.some((m) => sel.has(String(m)));
-        })
-      : supplyProjects;
+  const supplyProjectsToShow = useMemo(() => {
+    if (selectedProjectIds.length === 0) return supplyProjects;
+    const sel = new Set(selectedProjectIds.map(String));
+    return supplyProjects.filter((p) => {
+      if (sel.has(String(p.id))) return true;
+      const members = p.mergedProjectIds || projectIdsForSupplyCardId(p.id, supplyEnv);
+      return members.some((m) => sel.has(String(m)));
+    });
+  }, [selectedProjectIds, supplyProjects, supplyEnv]);
 
   const yuanliMetabaseConfigured = Boolean(
     String(import.meta.env.VITE_YUANLI_METABASE_SESSION_TOKEN || '').trim() ||
@@ -2457,7 +2529,7 @@ export default function App() {
   );
 
   const filterBarProjects = useMemo(() => {
-    if (activeTab === 'supply' && supplyEnv === SUPPLY_ENV_YUANLI) {
+    if (tabIndicator === 'supply' && supplyEnv === SUPPLY_ENV_YUANLI) {
       const ids = new Set(['5', '6', '8', '10', '20']);
       for (const k of Object.keys(ordersByProjectDateYuanli || {})) ids.add(String(k));
       for (const k of Object.keys(supplyYuanliByProjectId || {})) ids.add(String(k));
@@ -2476,19 +2548,19 @@ export default function App() {
     }
     return instanceProjectOptions.length ? instanceProjectOptions : projects;
   }, [
-    activeTab,
+    tabIndicator,
     supplyEnv,
     instanceProjectOptions,
     ordersByProjectDateYuanli,
     supplyYuanliByProjectId,
   ]);
 
-  const instanceProjectsToShow =
-    selectedProjectIds.length > 0
-      ? instanceProjectOptions.filter((p) => selectedProjectIds.includes(String(p.id)))
-      : instanceProjectOptions.length
-        ? instanceProjectOptions
-        : projects;
+  const instanceProjectsToShow = useMemo(() => {
+    if (selectedProjectIds.length > 0) {
+      return instanceProjectOptions.filter((p) => selectedProjectIds.includes(String(p.id)));
+    }
+    return instanceProjectOptions.length ? instanceProjectOptions : projects;
+  }, [selectedProjectIds, instanceProjectOptions]);
 
   const tabs = [
     { id: 'tasks', label: '游戏云化任务', icon: Zap },
@@ -2499,20 +2571,20 @@ export default function App() {
 
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] text-slate-900 font-sans selection:bg-blue-100 selection:text-blue-900 pb-12">
+    <div className="vercel-theme min-h-screen bg-white text-[#171717] font-sans selection:bg-[hsla(0,0%,95%,1)] selection:text-[#171717] pb-12">
       {/* 顶部导航 (Header) */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-50">
-        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
+      <header className="sticky top-0 z-50">
+        <div className="w-full px-4 sm:px-6 lg:px-10">
+          <div className="flex items-center justify-between h-12">
             {/* Logo & Title */}
             <div className="flex items-center gap-4">
-              <div className="bg-slate-900 p-2 rounded-lg">
+              <div className="bg-[#171717] p-2 rounded-md">
                 <Activity className="w-5 h-5 text-white" />
               </div>
               <div>
-                <h1 className="text-lg font-bold leading-tight">资源全链路观测</h1>
-                <div className="flex items-center gap-1.5 text-xs font-medium text-emerald-500">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <h1 className="text-lg font-semibold leading-tight tracking-[-0.32px]">资源全链路观测</h1>
+                <div className="flex items-center gap-1.5 text-xs font-medium text-black">
+                  <span className="w-1.5 h-1.5 rounded-full bg-black animate-pulse" />
                   实时监测已开启
                 </div>
               </div>
@@ -2522,17 +2594,19 @@ export default function App() {
             <nav className="hidden md:flex gap-2">
               {tabs.map((tab) => {
                 const Icon = tab.icon;
-                const isActive = activeTab === tab.id;
+                const isActive = tabIndicator === tab.id;
                 return (
                   <button
                     key={tab.id}
                     type="button"
-                    onClick={() => startTransition(() => setActiveTab(tab.id))}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
-                      isActive ? 'bg-blue-50 text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+                    onClick={() => selectTab(tab.id)}
+                    className={`flex items-center gap-2 px-4 py-1.5 rounded-full text-sm font-medium transition-colors duration-100 ${
+                      isActive
+                        ? 'bg-[#171717] text-white shadow-[0_0_0_1px_rgba(0,0,0,0.08)]'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-white border border-transparent'
                     }`}
                   >
-                    <Icon className={`w-4 h-4 ${isActive ? 'text-blue-600' : 'text-slate-400'}`} />
+                    <Icon className={`w-4 h-4 ${isActive ? 'text-white' : 'text-slate-400'}`} />
                     {tab.label}
                   </button>
                 );
@@ -2544,46 +2618,57 @@ export default function App() {
       </header>
 
       {/* 主内容区 (Main Content) */}
-      <main className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="w-full px-4 sm:px-6 lg:px-10 py-8">
         <FilterBar
           projects={filterBarProjects}
           selectedProjectIds={selectedProjectIds}
           setSelectedProjectIds={setSelectedProjectIds}
-          loading={useApi && activeTab === 'supply' && supplyFetchPending}
+          loading={useApi && tabIndicator === 'supply' && supplyFetchPending}
         />
 
-        <div className="mt-4">
-          {activeTab === 'supply' && (
-            <div role="tabpanel" id="tabpanel-supply">
-              <SupplyView
-                projectsToShow={supplyProjectsToShow}
-                supplyFetchPending={supplyFetchPending}
-                supplyEnv={supplyEnv}
-                setSupplyEnv={setSupplyEnv}
-                useApi={useApi}
-                yuanliMetabaseConfigured={yuanliMetabaseConfigured}
-              />
-            </div>
-          )}
-          {activeTab === 'scheduling' && (
-            <div role="tabpanel" id="tabpanel-scheduling">
-              <SchedulingView />
-            </div>
-          )}
-          {activeTab === 'tasks' && (
-            <div role="tabpanel" id="tabpanel-tasks">
-              <CloudTaskView />
-            </div>
-          )}
-          {activeTab === 'instances' && (
-            <div role="tabpanel" id="tabpanel-instances">
-              <InstanceView
-                projectsToShow={instanceProjectsToShow}
-                instanceByProjectId={instanceByProjectId}
-                loading={useApi && instanceLoading}
-              />
-            </div>
-          )}
+        <div className="mt-4 min-h-[min(22rem,52vh)]">
+          <div
+            key={isTabTransitionPending ? `loading-${tabIndicator}` : `panel-${tabPanel}`}
+            className="tab-panel-buffer"
+          >
+            {isTabTransitionPending ? (
+              <TabPanelLoading tabLabel={tabs.find((t) => t.id === tabIndicator)?.label ?? '页面'} />
+            ) : (
+              <>
+                {tabPanel === 'supply' && (
+                  <div role="tabpanel" id="tabpanel-supply">
+                    <SupplyView
+                      projectsToShow={supplyProjectsToShow}
+                      supplyFetchPending={supplyFetchPending}
+                      supplyEnv={supplyEnv}
+                      setSupplyEnv={setSupplyEnv}
+                      useApi={useApi}
+                      yuanliMetabaseConfigured={yuanliMetabaseConfigured}
+                    />
+                  </div>
+                )}
+                {tabPanel === 'scheduling' && (
+                  <div role="tabpanel" id="tabpanel-scheduling">
+                    <SchedulingView />
+                  </div>
+                )}
+                {tabPanel === 'tasks' && (
+                  <div role="tabpanel" id="tabpanel-tasks">
+                    <CloudTaskView />
+                  </div>
+                )}
+                {tabPanel === 'instances' && (
+                  <div role="tabpanel" id="tabpanel-instances">
+                    <InstanceView
+                      projectsToShow={instanceProjectsToShow}
+                      instanceByProjectId={instanceByProjectId}
+                      loading={useApi && instanceLoading}
+                    />
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
       </main>
     </div>
