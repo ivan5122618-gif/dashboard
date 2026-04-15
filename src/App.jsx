@@ -618,7 +618,202 @@ const queueData = [
   { time: '04-03 13:00', users: 180 },
 ];
 
-const cloudTaskTrend = generateTrendData(7, 25, 5);
+const CLOUD_TASK_DATES = ['04-03', '04-04', '04-05', '04-06', '04-07', '04-08', '04-09'];
+const buildCloudStageTrend = ({
+  successBase,
+  successWave,
+  durationBase,
+  durationWave,
+}) =>
+  CLOUD_TASK_DATES.map((date, idx) => {
+    const swing = Math.sin((idx + 1) * 0.9);
+    const successRate = Math.max(
+      80,
+      Math.min(99.9, Number((successBase + swing * successWave).toFixed(2))),
+    );
+    const avgDuration = Math.max(
+      20,
+      Number((durationBase + Math.cos((idx + 1) * 0.7) * durationWave).toFixed(1)),
+    );
+    const failRate = Number((100 - successRate).toFixed(2));
+    return { time: date, successRate, failRate, avgDuration };
+  });
+
+const CLOUD_TASK_PHASES = [
+  {
+    id: 'image-save',
+    title: '3.1 游戏镜像保存阶段',
+    aliases: '端游：游戏保存；手游：保存镜像',
+    object: '游戏保存 / 保存镜像子任务',
+    scope: '项目级别筛选',
+    statusScope: '游戏保存成功 / 镜像保存成功 / 游戏保存失败 / 镜像保存失败',
+    avgDuration: 122.4,
+    successRate: 97.62,
+    totalTasks: 12640,
+    trend: buildCloudStageTrend({ successBase: 97.6, successWave: 0.8, durationBase: 122, durationWave: 12 }),
+    roomBreakdown: [
+      { name: '华北A', avgDuration: 118.3, successRate: 98.1, failRate: 1.9, tasks: 3510 },
+      { name: '华东B', avgDuration: 126.7, successRate: 97.2, failRate: 2.8, tasks: 2890 },
+      { name: '华南A', avgDuration: 121.1, successRate: 97.9, failRate: 2.1, tasks: 2432 },
+    ],
+  },
+  {
+    id: 'room-dispatch',
+    title: '3.2 游戏云化｜机房分发阶段',
+    aliases: '机房分发',
+    object: '机房分发子任务',
+    scope: '项目级别筛选',
+    statusScope: '机房分发成功 / 机房分发失败',
+    avgDuration: 86.5,
+    successRate: 96.78,
+    totalTasks: 10928,
+    trend: buildCloudStageTrend({ successBase: 96.8, successWave: 1.1, durationBase: 86, durationWave: 10 }),
+    roomBreakdown: [
+      { name: '华北A', avgDuration: 81.9, successRate: 97.4, failRate: 2.6, tasks: 3012 },
+      { name: '华东B', avgDuration: 88.6, successRate: 96.3, failRate: 3.7, tasks: 2745 },
+      { name: '华南A', avgDuration: 85.7, successRate: 96.8, failRate: 3.2, tasks: 2308 },
+    ],
+  },
+  {
+    id: 'deploy',
+    title: '3.3 游戏部署阶段',
+    aliases: '游戏部署',
+    object: '游戏部署子任务',
+    scope: '项目级别筛选',
+    statusScope: '游戏部署成功 / 游戏部署失败',
+    avgDuration: 73.2,
+    successRate: 98.24,
+    totalTasks: 10116,
+    trend: buildCloudStageTrend({ successBase: 98.2, successWave: 0.7, durationBase: 73, durationWave: 8 }),
+    roomBreakdown: [
+      { name: '华北A', avgDuration: 70.8, successRate: 98.6, failRate: 1.4, tasks: 2950 },
+      { name: '华东B', avgDuration: 75.1, successRate: 97.9, failRate: 2.1, tasks: 2481 },
+      { name: '华南A', avgDuration: 72.6, successRate: 98.3, failRate: 1.7, tasks: 2196 },
+    ],
+  },
+  {
+    id: 'accelerate',
+    title: '3.4 游戏加速阶段',
+    aliases: '游戏加速',
+    object: '游戏加速子任务',
+    scope: '项目级别筛选',
+    statusScope: '游戏加速成功 / 游戏加速失败',
+    avgDuration: 49.8,
+    successRate: 97.18,
+    totalTasks: 9660,
+    trend: buildCloudStageTrend({ successBase: 97.2, successWave: 0.9, durationBase: 50, durationWave: 6 }),
+    roomBreakdown: [
+      { name: '华北A', avgDuration: 47.1, successRate: 97.9, failRate: 2.1, tasks: 2710 },
+      { name: '华东B', avgDuration: 51.4, successRate: 96.8, failRate: 3.2, tasks: 2332 },
+      { name: '华南A', avgDuration: 50.3, successRate: 97.0, failRate: 3.0, tasks: 2014 },
+    ],
+  },
+  {
+    id: 'disk-mount',
+    title: '3.5 云盘挂载阶段',
+    aliases: '云盘挂载',
+    object: '云盘挂载子任务',
+    scope: '项目级别筛选',
+    statusScope: '云盘挂载成功 / 云盘挂载失败',
+    avgDuration: 58.6,
+    successRate: 98.67,
+    totalTasks: 9140,
+    trend: buildCloudStageTrend({ successBase: 98.7, successWave: 0.6, durationBase: 59, durationWave: 7 }),
+    roomBreakdown: [
+      { name: '华北A', avgDuration: 56.8, successRate: 99.0, failRate: 1.0, tasks: 2598 },
+      { name: '华东B', avgDuration: 59.9, successRate: 98.4, failRate: 1.6, tasks: 2215 },
+      { name: '华南A', avgDuration: 58.1, successRate: 98.6, failRate: 1.4, tasks: 1980 },
+    ],
+  },
+  {
+    id: 'disk-dispatch',
+    title: '3.6 云盘分发阶段',
+    aliases: '云盘分发',
+    object: '云盘分发子任务',
+    scope: '项目级别筛选',
+    statusScope: '云盘分发成功 / 云盘分发失败',
+    avgDuration: 64.1,
+    successRate: 97.95,
+    totalTasks: 8876,
+    trend: buildCloudStageTrend({ successBase: 98.0, successWave: 0.8, durationBase: 64, durationWave: 7 }),
+    roomBreakdown: [
+      { name: '华北A', avgDuration: 61.5, successRate: 98.3, failRate: 1.7, tasks: 2468 },
+      { name: '华东B', avgDuration: 65.7, successRate: 97.6, failRate: 2.4, tasks: 2108 },
+      { name: '华南A', avgDuration: 64.8, successRate: 97.9, failRate: 2.1, tasks: 1895 },
+    ],
+  },
+  {
+    id: 'auto-cloud',
+    title: '3.7 自动云化任务',
+    aliases: '任务类型：全自动云化',
+    object: '自动云化全链路子任务',
+    scope: '项目级别筛选',
+    statusScope: '以加速阶段成功/失败为口径',
+    avgDuration: 211.3,
+    successRate: 96.34,
+    totalTasks: 4022,
+    trend: buildCloudStageTrend({ successBase: 96.4, successWave: 1.2, durationBase: 211, durationWave: 18 }),
+    roomBreakdown: [
+      { name: '华北A', avgDuration: 204.6, successRate: 96.9, failRate: 3.1, tasks: 1184 },
+      { name: '华东B', avgDuration: 216.8, successRate: 95.8, failRate: 4.2, tasks: 965 },
+      { name: '华南A', avgDuration: 212.7, successRate: 96.2, failRate: 3.8, tasks: 843 },
+    ],
+  },
+];
+
+const CLOUD_TASK_GAMESET_OPTIONS = [
+  { id: 'all', label: '全部游戏集' },
+  { id: 'gs-1001', label: '燕云主线（1001）' },
+  { id: 'gs-1002', label: '逆水寒联机（1002）' },
+  { id: 'gs-1003', label: '永劫竞速（1003）' },
+  { id: 'gs-1004', label: '字节体验服（1004）' },
+];
+
+const CLOUD_TASK_PERIOD_OPTIONS = [
+  { id: '7', label: '近7天' },
+  { id: '14', label: '近14天' },
+  { id: '30', label: '近30天' },
+];
+
+const CLOUD_ROOM_NAME_TO_ID = {
+  华北A: 'IDC-BJ-A',
+  华东B: 'IDC-SH-B',
+  华南A: 'IDC-GZ-A',
+};
+
+function buildRecentDayLabels(days) {
+  const labels = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i -= 1) {
+    const d = new Date(now);
+    d.setDate(now.getDate() - i);
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    labels.push(`${mm}-${dd}`);
+  }
+  return labels;
+}
+
+function buildCloudTrendByPeriod(baseTrend, days, successShift = 0, durationScale = 1) {
+  const labels = buildRecentDayLabels(days);
+  return labels.map((label, idx) => {
+    const src = baseTrend[idx % baseTrend.length] || baseTrend[baseTrend.length - 1];
+    const successRate = Math.max(
+      80,
+      Math.min(99.9, Number((Number(src?.successRate || 0) + successShift).toFixed(2))),
+    );
+    const avgDuration = Math.max(
+      20,
+      Number((Number(src?.avgDuration || 0) * durationScale).toFixed(1)),
+    );
+    return {
+      time: label,
+      successRate,
+      failRate: Number((100 - successRate).toFixed(2)),
+      avgDuration,
+    };
+  });
+}
 const overallAvailability = generateTrendData(14, 95, 2);
 
 const generateTableData = (unit = '路') => [
@@ -1465,47 +1660,413 @@ const SchedulingView = () => (
 );
 
 // 3. 游戏云化任务 (Cloudification Tasks)
-const CloudTaskView = () => (
-  <div className="space-y-6">
-    <Card className="overflow-hidden relative">
-      {/* 装饰性背景 */}
-      <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-50 rounded-full blur-3xl -mr-20 -mt-20 opacity-50 pointer-events-none" />
+const CloudTaskView = () => {
+  const phaseList = CLOUD_TASK_PHASES;
+  const cloudProjectOptions = useMemo(
+    () => [
+      { id: 'all', label: '全部项目' },
+      ...projects.map((p) => ({ id: String(p.id), label: `${p.name} (${p.id})` })),
+    ],
+    [],
+  );
+  const [phaseFilters, setPhaseFilters] = useState(() =>
+    Object.fromEntries(
+      phaseList.map((phase) => [
+        phase.id,
+        { projectId: 'all', gameSetId: 'all', periodDays: '7' },
+      ]),
+    ),
+  );
+  const [expandedPhaseIds, setExpandedPhaseIds] = useState(() =>
+    phaseList.length ? [phaseList[0].id] : [],
+  );
 
-      <div className="p-5 sm:p-6 lg:p-8 flex flex-col md:flex-row items-center gap-6 sm:gap-8 lg:gap-10">
-        <div className="md:w-1/3 shrink-0 relative z-10">
-          <h2 className="text-lg font-semibold flex items-center gap-2 text-blue-600 mb-6">
-            <Zap className="w-5 h-5" /> 游戏云化任务
-          </h2>
-          <p className="text-sm font-medium text-slate-500 mb-2">云化任务平均耗时</p>
-          <div className="flex items-end gap-3 mb-2">
-            <span className="text-5xl sm:text-6xl font-black text-slate-900 tracking-tighter">26.3</span>
-            <span className="text-2xl font-bold text-slate-500 mb-1">min</span>
+  const updatePhaseFilter = useCallback((phaseId, key, value) => {
+    setPhaseFilters((prev) => ({
+      ...prev,
+      [phaseId]: {
+        ...(prev[phaseId] || { projectId: 'all', gameSetId: 'all', periodDays: '7' }),
+        [key]: value,
+      },
+    }));
+  }, []);
+  const togglePhaseDetails = useCallback((phaseId) => {
+    setExpandedPhaseIds((prev) =>
+      prev.includes(phaseId) ? prev.filter((id) => id !== phaseId) : [...prev, phaseId],
+    );
+  }, []);
+
+  const stageViews = useMemo(() => {
+    return phaseList.map((phase) => {
+      const filter = phaseFilters[phase.id] || {
+        projectId: 'all',
+        gameSetId: 'all',
+        periodDays: '7',
+      };
+
+      const projectSeed = filter.projectId === 'all' ? 0 : Number(filter.projectId) % 9;
+      const gameSetSeed = filter.gameSetId === 'all' ? 0 : Number(filter.gameSetId.replace(/[^\d]/g, '')) % 7;
+      const successShift = projectSeed * 0.08 - gameSetSeed * 0.05;
+      const durationScale = 1 + (gameSetSeed - 3) * 0.015 + (projectSeed - 4) * 0.01;
+      const periodDays = Number(filter.periodDays || 7);
+
+      const successRate = Math.max(
+        80,
+        Math.min(99.9, Number((phase.successRate + successShift).toFixed(2))),
+      );
+      const avgDuration = Math.max(20, Number((phase.avgDuration * durationScale).toFixed(1)));
+      const totalTasks = Math.max(
+        1,
+        Math.round(phase.totalTasks * (periodDays / 7) * (filter.projectId === 'all' ? 1 : 0.22)),
+      );
+
+      const trend = buildCloudTrendByPeriod(
+        phase.trend,
+        periodDays,
+        successShift,
+        durationScale,
+      );
+      const maxDuration = trend.reduce((max, item) => Math.max(max, Number(item.avgDuration) || 0), 0);
+      const minDuration = trend.reduce((min, item) => Math.min(min, Number(item.avgDuration) || Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
+      const roomBreakdown = phase.roomBreakdown.map((row) => {
+        const rowSuccess = Math.max(
+          80,
+          Math.min(99.9, Number((row.successRate + successShift * 0.9).toFixed(2))),
+        );
+        const rowDuration = Math.max(20, Number((row.avgDuration * durationScale).toFixed(1)));
+        const rowTasks = Math.max(
+          1,
+          Math.round(row.tasks * (periodDays / 7) * (filter.projectId === 'all' ? 1 : 0.28)),
+        );
+        return {
+          ...row,
+          roomId: CLOUD_ROOM_NAME_TO_ID[row.name] || `IDC-${row.name}`,
+          roomName: row.name,
+          successRate: rowSuccess,
+          failRate: Number((100 - rowSuccess).toFixed(2)),
+          avgDuration: rowDuration,
+          tasks: rowTasks,
+        };
+      });
+
+      return {
+        ...phase,
+        filter,
+        trend,
+        successRate,
+        avgDuration,
+        totalTasks,
+        failRate: Number((100 - successRate).toFixed(2)),
+        maxDuration: Number(maxDuration.toFixed(1)),
+        minDuration: Number((minDuration === Number.MAX_SAFE_INTEGER ? 0 : minDuration).toFixed(1)),
+        roomBreakdown,
+      };
+    });
+  }, [phaseFilters, phaseList]);
+
+  const globalTaskCount = stageViews.reduce((sum, p) => sum + p.totalTasks, 0);
+  const globalAvgDuration =
+    stageViews.reduce((sum, p) => sum + p.avgDuration * p.totalTasks, 0) / Math.max(globalTaskCount, 1);
+  const globalSuccessRate =
+    stageViews.reduce((sum, p) => sum + p.successRate * p.totalTasks, 0) / Math.max(globalTaskCount, 1);
+  const globalFailRate = Math.max(0, 100 - globalSuccessRate);
+  const globalMaxDuration = Math.max(...stageViews.map((phase) => phase.maxDuration || 0));
+  const globalMinDuration = Math.min(
+    ...stageViews.map((phase) =>
+      Number.isFinite(phase.minDuration) && phase.minDuration > 0 ? phase.minDuration : Number.MAX_SAFE_INTEGER,
+    ),
+  );
+
+  const globalTrend = useMemo(() => {
+    const maxDays = stageViews.reduce(
+      (max, phase) => Math.max(max, phase.trend.length),
+      7,
+    );
+    const labels = buildRecentDayLabels(maxDays);
+    return labels.map((date, idx) => {
+      const rows = stageViews
+        .map((phase) => phase.trend[phase.trend.length - maxDays + idx])
+        .filter(Boolean);
+      return {
+        time: date,
+        successRate:
+          rows.reduce((sum, row) => sum + row.successRate, 0) / Math.max(rows.length, 1),
+        avgDuration:
+          rows.reduce((sum, row) => sum + row.avgDuration, 0) / Math.max(rows.length, 1),
+      };
+    });
+  }, [stageViews]);
+
+  return (
+    <div className="space-y-6">
+      <Card className="p-5 sm:p-6">
+        <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold flex items-center gap-2 text-blue-600">
+              <Zap className="w-5 h-5" /> 游戏云化任务指标看板（Mock）
+            </h2>
+            <p className="text-xs text-slate-500 mt-1">
+              口径：仅统计已完成子任务，默认近 7 天，可按项目筛选。耗时单位：秒。
+            </p>
           </div>
-          <div className="inline-flex items-center gap-1.5 text-emerald-500 text-sm font-medium mt-2">
-            <Activity className="w-4 h-4" /> 正常运行中
+          <div className="flex flex-wrap gap-2 text-xs">
+            <span className="px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-600">
+              子任务总数 {globalTaskCount.toLocaleString()}
+            </span>
+            <span className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+              成功率 {globalSuccessRate.toFixed(2)}%
+            </span>
+            <span className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200">
+              失败率 {globalFailRate.toFixed(2)}%
+            </span>
+            <span className="px-2 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200">
+              平均耗时 {globalAvgDuration.toFixed(1)}s
+            </span>
+            <span className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">
+              最长耗时 {globalMaxDuration.toFixed(1)}s
+            </span>
+            <span className="px-2 py-1 rounded bg-sky-50 text-sky-700 border border-sky-200">
+              最短耗时 {(globalMinDuration === Number.MAX_SAFE_INTEGER ? 0 : globalMinDuration).toFixed(1)}s
+            </span>
           </div>
         </div>
+      </Card>
 
-        <div className="md:w-2/3 h-[180px] sm:h-[200px] w-full border-t pt-4 md:border-t-0 md:border-l border-slate-100 md:pl-10 md:pt-0 relative z-10">
-          <p className="text-sm text-slate-400 mb-4 flex items-center gap-2">
-            <Clock className="w-4 h-4" /> 24小时实时趋势
-          </p>
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={cloudTaskTrend}>
-              <defs>
-                <linearGradient id="colorCloud" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#000000" stopOpacity={0.22} />
-                  <stop offset="95%" stopColor="#000000" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <Area type="monotone" dataKey="value" stroke="#0a72ef" strokeWidth={2.5} fillOpacity={1} fill="url(#colorCloud)" />
-            </AreaChart>
-          </ResponsiveContainer>
+      <Card className="p-4 sm:p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <Clock className="w-4 h-4 text-slate-500" />
+          <h3 className="text-sm font-semibold text-slate-800">全阶段近 7 天总览趋势</h3>
         </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="h-52">
+            <p className="text-xs text-slate-500 mb-2">成功率（%）</p>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={globalTrend}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} minTickGap={24} />
+                <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} width={38} />
+                <Tooltip
+                  formatter={(value) => [`${Number(value).toFixed(2)}%`, '成功率']}
+                  contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                />
+                <Line type="monotone" dataKey="successRate" stroke="#0a72ef" strokeWidth={2.2} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="h-52">
+            <p className="text-xs text-slate-500 mb-2">平均耗时（秒）</p>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={globalTrend}>
+                <defs>
+                  <linearGradient id="cloudDurationGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#0a72ef" stopOpacity={0.22} />
+                    <stop offset="95%" stopColor="#0a72ef" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} width={38} />
+                <Tooltip
+                  formatter={(value) => [`${Number(value).toFixed(1)}s`, '平均耗时']}
+                  contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                />
+                <Area type="monotone" dataKey="avgDuration" stroke="#0a72ef" fill="url(#cloudDurationGradient)" strokeWidth={2.2} isAnimationActive={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </Card>
+
+      <div className="space-y-4">
+        {stageViews.map((phase) => (
+          <Card key={phase.id} className="p-4 sm:p-5">
+            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+              <div>
+                <h3 className="text-base font-semibold text-slate-800">{phase.title}</h3>
+                <p className="text-xs text-slate-500 mt-1">{phase.aliases}</p>
+              </div>
+              <div className="flex items-start gap-4">
+                <div className="text-xs text-slate-500 leading-5">
+                  <div>统计维度：{phase.scope}</div>
+                  <div>统计对象：{phase.object}</div>
+                  <div>统计状态：{phase.statusScope}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => togglePhaseDetails(phase.id)}
+                  className="inline-flex items-center gap-1 rounded-md bg-white text-[#171717] border border-slate-200 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-slate-50"
+                >
+                  {expandedPhaseIds.includes(phase.id) ? (
+                    <>
+                      收起详情 <ChevronUp className="w-4 h-4 ml-0.5" />
+                    </>
+                  ) : (
+                    <>
+                      展开详情 <ChevronDown className="w-4 h-4 ml-0.5" />
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mt-4">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs text-slate-500">全局平均耗时</p>
+                <p className="text-xl font-black text-slate-900 tabular-nums mt-1">{phase.avgDuration.toFixed(1)}s</p>
+                <p className="text-[11px] text-slate-500 mt-1">Σ(结束-开始)/子任务总数</p>
+              </div>
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                <p className="text-xs text-emerald-700">成功率</p>
+                <p className="text-xl font-black text-emerald-700 tabular-nums mt-1">{phase.successRate.toFixed(2)}%</p>
+                <p className="text-[11px] text-emerald-700 mt-1">成功子任务数 / 子任务总数</p>
+              </div>
+              <div className="rounded-lg border border-rose-200 bg-rose-50 p-3">
+                <p className="text-xs text-rose-700">失败率</p>
+                <p className="text-xl font-black text-rose-700 tabular-nums mt-1">{phase.failRate.toFixed(2)}%</p>
+                <p className="text-[11px] text-rose-700 mt-1">失败子任务数 / 子任务总数</p>
+              </div>
+              <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">
+                <p className="text-xs text-indigo-700">最长耗时</p>
+                <p className="text-xl font-black text-indigo-700 tabular-nums mt-1">{phase.maxDuration.toFixed(1)}s</p>
+                <p className="text-[11px] text-indigo-700 mt-1">周期内子任务耗时最大值</p>
+              </div>
+              <div className="rounded-lg border border-sky-200 bg-sky-50 p-3">
+                <p className="text-xs text-sky-700">最短耗时</p>
+                <p className="text-xl font-black text-sky-700 tabular-nums mt-1">{phase.minDuration.toFixed(1)}s</p>
+                <p className="text-[11px] text-sky-700 mt-1">周期内子任务耗时最小值</p>
+              </div>
+            </div>
+
+            {expandedPhaseIds.includes(phase.id) && (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4 pt-4 border-t border-slate-100">
+                  <label className="text-xs text-slate-500">
+                    项目筛选
+                    <select
+                      value={phase.filter.projectId}
+                      onChange={(e) => updatePhaseFilter(phase.id, 'projectId', e.target.value)}
+                      className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700"
+                    >
+                      {cloudProjectOptions.map((opt) => (
+                        <option key={`project-${opt.id}`} value={opt.id}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-xs text-slate-500">
+                    游戏集名称ID
+                    <select
+                      value={phase.filter.gameSetId}
+                      onChange={(e) => updatePhaseFilter(phase.id, 'gameSetId', e.target.value)}
+                      className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700"
+                    >
+                      {CLOUD_TASK_GAMESET_OPTIONS.map((opt) => (
+                        <option key={`gameset-${opt.id}`} value={opt.id}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-xs text-slate-500">
+                    周期筛选
+                    <select
+                      value={phase.filter.periodDays}
+                      onChange={(e) => updatePhaseFilter(phase.id, 'periodDays', e.target.value)}
+                      className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700"
+                    >
+                      {CLOUD_TASK_PERIOD_OPTIONS.map((opt) => (
+                        <option key={`period-${opt.id}`} value={opt.id}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+                  <div className="h-48">
+                    <p className="text-xs text-slate-500 mb-2">成功率趋势（{phase.filter.periodDays}天）</p>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={phase.trend}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                        <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} minTickGap={20} />
+                        <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} width={36} />
+                        <Tooltip
+                          formatter={(value) => [`${Number(value).toFixed(2)}%`, '成功率']}
+                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                        />
+                        <Line type="monotone" dataKey="successRate" stroke="#0a72ef" strokeWidth={2} dot={false} isAnimationActive={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="h-48">
+                    <p className="text-xs text-slate-500 mb-2">平均耗时趋势（{phase.filter.periodDays}天）</p>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={phase.trend}>
+                        <defs>
+                          <linearGradient id={`durationGradient-${phase.id}`} x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#0a72ef" stopOpacity={0.22} />
+                            <stop offset="95%" stopColor="#0a72ef" stopOpacity={0} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                        <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                        <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} width={36} />
+                        <Tooltip
+                          formatter={(value) => [`${Number(value).toFixed(1)}s`, '平均耗时']}
+                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="avgDuration"
+                          stroke="#0a72ef"
+                          fill={`url(#durationGradient-${phase.id})`}
+                          strokeWidth={2}
+                          isAnimationActive={false}
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-lg border border-slate-200 overflow-hidden">
+                  <div className="px-3 py-2 bg-slate-50 text-xs font-medium text-slate-600">
+                    机房分组样本（Mock）
+                  </div>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-slate-500 border-b border-slate-100">
+                        <th className="py-2 px-3 text-left font-medium">机房ID</th>
+                        <th className="py-2 px-3 text-left font-medium">机房名称</th>
+                        <th className="py-2 px-3 text-right font-medium">任务数</th>
+                        <th className="py-2 px-3 text-right font-medium">平均耗时(s)</th>
+                        <th className="py-2 px-3 text-right font-medium">成功率</th>
+                        <th className="py-2 px-3 text-right font-medium">失败率</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-slate-700">
+                      {phase.roomBreakdown.map((row) => (
+                        <tr key={`${phase.id}-${row.roomId}`} className="border-b border-slate-100 last:border-0">
+                          <td className="py-2 px-3 font-mono text-xs">{row.roomId}</td>
+                          <td className="py-2 px-3">{row.roomName}</td>
+                          <td className="py-2 px-3 text-right tabular-nums">{row.tasks.toLocaleString()}</td>
+                          <td className="py-2 px-3 text-right tabular-nums">{row.avgDuration.toFixed(1)}</td>
+                          <td className="py-2 px-3 text-right tabular-nums text-emerald-600">{row.successRate.toFixed(2)}%</td>
+                          <td className="py-2 px-3 text-right tabular-nums text-rose-600">{row.failRate.toFixed(2)}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </Card>
+        ))}
       </div>
-    </Card>
-  </div>
-);
+    </div>
+  );
+};
 
 const InstanceProjectCard = memo(function InstanceProjectCard({ proj, rank, isExpanded, onToggle }) {
   return (
