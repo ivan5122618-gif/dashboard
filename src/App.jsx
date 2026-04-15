@@ -953,8 +953,8 @@ const FilterBar = memo(function FilterBar({ projects, selectedProjectIds, setSel
   };
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-4 mb-6 bg-white p-3 rounded-xl shadow-sm border border-slate-100">
-      <div className="flex items-center gap-3 flex-wrap">
+    <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between mb-6 bg-white p-3 rounded-xl shadow-sm border border-slate-100">
+      <div className="flex w-full flex-col items-stretch gap-3 sm:w-auto sm:flex-row sm:items-center sm:flex-wrap">
         {loading ? (
           <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500">
             <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" aria-hidden />
@@ -972,7 +972,7 @@ const FilterBar = memo(function FilterBar({ projects, selectedProjectIds, setSel
           </button>
         </div>
 
-        <div className="relative">
+        <div className="relative w-full sm:w-auto">
           <input
             value={keyword}
             onChange={(e) => {
@@ -983,11 +983,11 @@ const FilterBar = memo(function FilterBar({ projects, selectedProjectIds, setSel
             onBlur={() => setTimeout(() => setOpen(false), 150)}
             type="text"
             placeholder="搜索项目（可输入ID/名称）..."
-            className="pl-3 pr-10 py-1.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 w-64 bg-slate-50"
+            className="w-full sm:w-64 pl-3 pr-10 py-1.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-slate-50"
           />
 
           {open && options.length > 0 && (
-            <div className="absolute left-0 top-full mt-2 z-50 w-72 max-h-64 overflow-auto rounded-2xl border border-slate-200 bg-white shadow-xl">
+            <div className="absolute left-0 top-full mt-2 z-50 w-full sm:w-72 max-h-64 overflow-auto rounded-2xl border border-slate-200 bg-white shadow-xl">
               <div className="px-3 py-2 text-[11px] font-bold text-slate-400 border-b border-slate-100">
                 下拉搜索结果（点击选择）
               </div>
@@ -1014,7 +1014,7 @@ const FilterBar = memo(function FilterBar({ projects, selectedProjectIds, setSel
           )}
 
           {open && options.length === 0 && (
-            <div className="absolute left-0 top-full mt-2 z-50 w-72 rounded-2xl border border-slate-200 bg-white shadow-xl">
+            <div className="absolute left-0 top-full mt-2 z-50 w-full sm:w-72 rounded-2xl border border-slate-200 bg-white shadow-xl">
               <div className="px-3 py-3 text-[12px] text-slate-400 font-bold">无匹配项目</div>
             </div>
           )}
@@ -1026,7 +1026,7 @@ const FilterBar = memo(function FilterBar({ projects, selectedProjectIds, setSel
           已选 {selectedProjectIds.length} 个
         </span>
       ) : (
-        <div />
+        <div className="hidden sm:block" />
       )}
     </div>
   );
@@ -1359,7 +1359,7 @@ const SupplyView = ({
             </div>
           </div>
 
-          <div className="flex gap-4 p-4 bg-slate-50 rounded-xl border border-slate-100 min-w-[300px]">
+          <div className="w-full md:w-auto flex flex-col sm:flex-row gap-4 p-4 bg-slate-50 rounded-xl border border-slate-100 sm:min-w-[300px]">
             <div className="flex-1">
               <p className="text-xs text-slate-400 mb-1 flex items-center gap-1.5">
                 供应峰值（各卡最近一日）
@@ -1369,7 +1369,7 @@ const SupplyView = ({
               </p>
               <p className="text-xl font-semibold text-slate-700">{totalSupply.toLocaleString()}</p>
             </div>
-            <div className="w-px bg-slate-200" />
+            <div className="h-px sm:h-auto sm:w-px bg-slate-200" />
             <div className="flex-1">
               <p className="text-xs text-slate-400 mb-1">订单（同上日）</p>
               <p className="text-xl font-semibold text-slate-700">{totalOrders.toLocaleString()}</p>
@@ -1417,7 +1417,7 @@ const SchedulingView = () => (
         {/* 左侧大数字 */}
         <div className="lg:w-1/3 flex flex-col justify-center">
           <p className="text-sm font-medium text-slate-500 mb-2">排队最大人数</p>
-          <div className="text-7xl font-black text-slate-900 tracking-tighter mb-6">658</div>
+          <div className="text-5xl sm:text-6xl lg:text-7xl font-black text-slate-900 tracking-tighter mb-6">658</div>
 
           <div className="inline-flex items-center gap-2 bg-emerald-50 text-emerald-600 px-3 py-2 rounded-lg text-sm font-medium w-fit border border-emerald-100">
             <Activity className="w-4 h-4" /> 峰值时间: 04-01 14:40
@@ -1425,7 +1425,7 @@ const SchedulingView = () => (
         </div>
 
         {/* 右侧面积图 */}
-        <div className="lg:w-2/3 h-[400px]">
+        <div className="lg:w-2/3 h-[280px] sm:h-[340px] lg:h-[400px]">
           <div className="flex justify-between items-center mb-4">
             <p className="text-sm font-medium text-slate-500">近24小时排队趋势</p>
           </div>
@@ -1471,14 +1471,14 @@ const CloudTaskView = () => (
       {/* 装饰性背景 */}
       <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-50 rounded-full blur-3xl -mr-20 -mt-20 opacity-50 pointer-events-none" />
 
-      <div className="p-8 flex flex-col md:flex-row items-center gap-10">
+      <div className="p-5 sm:p-6 lg:p-8 flex flex-col md:flex-row items-center gap-6 sm:gap-8 lg:gap-10">
         <div className="md:w-1/3 shrink-0 relative z-10">
           <h2 className="text-lg font-semibold flex items-center gap-2 text-blue-600 mb-6">
             <Zap className="w-5 h-5" /> 游戏云化任务
           </h2>
           <p className="text-sm font-medium text-slate-500 mb-2">云化任务平均耗时</p>
           <div className="flex items-end gap-3 mb-2">
-            <span className="text-6xl font-black text-slate-900 tracking-tighter">26.3</span>
+            <span className="text-5xl sm:text-6xl font-black text-slate-900 tracking-tighter">26.3</span>
             <span className="text-2xl font-bold text-slate-500 mb-1">min</span>
           </div>
           <div className="inline-flex items-center gap-1.5 text-emerald-500 text-sm font-medium mt-2">
@@ -1486,7 +1486,7 @@ const CloudTaskView = () => (
           </div>
         </div>
 
-        <div className="md:w-2/3 h-[200px] w-full border-l border-slate-100 pl-10 relative z-10">
+        <div className="md:w-2/3 h-[180px] sm:h-[200px] w-full border-t pt-4 md:border-t-0 md:border-l border-slate-100 md:pl-10 md:pt-0 relative z-10">
           <p className="text-sm text-slate-400 mb-4 flex items-center gap-2">
             <Clock className="w-4 h-4" /> 24小时实时趋势
           </p>
@@ -2575,14 +2575,14 @@ export default function App() {
       {/* 顶部导航 (Header) */}
       <header className="sticky top-0 z-50">
         <div className="w-full px-4 sm:px-6 lg:px-10">
-          <div className="flex items-center justify-between h-12">
+          <div className="flex flex-col items-start gap-3 py-3 md:h-12 md:flex-row md:items-center md:justify-between md:gap-0 md:py-0">
             {/* Logo & Title */}
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3 sm:gap-4">
               <div className="bg-[#171717] p-2 rounded-md">
                 <Activity className="w-5 h-5 text-white" />
               </div>
               <div>
-                <h1 className="text-lg font-semibold leading-tight tracking-[-0.32px]">资源全链路观测</h1>
+                <h1 className="text-base sm:text-lg font-semibold leading-tight tracking-[-0.32px]">资源全链路观测</h1>
                 <div className="flex items-center gap-1.5 text-xs font-medium text-black">
                   <span className="w-1.5 h-1.5 rounded-full bg-black animate-pulse" />
                   实时监测已开启
@@ -2591,7 +2591,7 @@ export default function App() {
             </div>
 
             {/* Tabs */}
-            <nav className="hidden md:flex gap-2">
+            <nav className="flex w-full md:w-auto gap-2 overflow-x-auto whitespace-nowrap pb-1 md:pb-0">
               {tabs.map((tab) => {
                 const Icon = tab.icon;
                 const isActive = tabIndicator === tab.id;
@@ -2600,7 +2600,7 @@ export default function App() {
                     key={tab.id}
                     type="button"
                     onClick={() => selectTab(tab.id)}
-                    className={`flex items-center gap-2 px-4 py-1.5 rounded-full text-sm font-medium transition-colors duration-100 ${
+                    className={`shrink-0 flex items-center gap-2 px-3 sm:px-4 py-1.5 rounded-full text-sm font-medium transition-colors duration-100 ${
                       isActive
                         ? 'bg-[#171717] text-white shadow-[0_0_0_1px_rgba(0,0,0,0.08)]'
                         : 'text-slate-600 hover:text-slate-900 hover:bg-white border border-transparent'
