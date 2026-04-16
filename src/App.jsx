@@ -775,6 +775,74 @@ const CLOUD_TASK_PERIOD_OPTIONS = [
   { id: '30', label: '近30天' },
 ];
 
+function parseCloudDeployDurationDataset(ds) {
+  const cols = ds?.data?.cols ?? [];
+  const rows = ds?.data?.rows ?? [];
+  const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9_]/g, '');
+  const findIdx = (keys) => {
+    const nkeys = keys.map(norm);
+    for (let i = 0; i < cols.length; i += 1) {
+      const name = norm(cols[i]?.name ?? cols[i]?.display_name ?? '');
+      if (!name) continue;
+      if (nkeys.some((k) => name.includes(k))) return i;
+    }
+    return -1;
+  };
+  const iIdc = findIdx(['idcid', 'idc_id', 'idc']);
+  const iIdcName = findIdx(['idcname', 'idc_name']);
+  const iDt = findIdx(['dt', 'date']);
+  const iProject = findIdx(['projectid', 'project_id']);
+  const iAvg = findIdx(['avg_duration']);
+  const iMax = findIdx(['max_duration']);
+  const iMin = findIdx(['min_duration']);
+  if (iIdc === -1 || iProject === -1) return [];
+
+  return rows.map((r) => ({
+    dt: normalizeCloudTaskDateKey(r[iDt]),
+    idcId: String(r[iIdc] ?? '').trim(),
+    idcName: String(iIdcName === -1 ? '' : r[iIdcName] ?? '').trim(),
+    projectId: normalizeProjectIdValue(r[iProject]),
+    avgDuration: Number(r[iAvg] ?? NaN),
+    maxDuration: Number(r[iMax] ?? NaN),
+    minDuration: Number(r[iMin] ?? NaN),
+  }));
+}
+
+function parseCloudDeploySuccessDataset(ds) {
+  const cols = ds?.data?.cols ?? [];
+  const rows = ds?.data?.rows ?? [];
+  const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9_]/g, '');
+  const findIdx = (keys) => {
+    const nkeys = keys.map(norm);
+    for (let i = 0; i < cols.length; i += 1) {
+      const name = norm(cols[i]?.name ?? cols[i]?.display_name ?? '');
+      if (!name) continue;
+      if (nkeys.some((k) => name.includes(k))) return i;
+    }
+    return -1;
+  };
+  const iIdc = findIdx(['idcid', 'idc_id', 'idc']);
+  const iDt = findIdx(['dt', 'date']);
+  const iProject = findIdx(['projectid', 'project_id']);
+  const iSuccessCnt = findIdx(['success_cnt']);
+  const iFailCnt = findIdx(['fail_cnt']);
+  const iTotalCnt = findIdx(['total_cnt']);
+  const iSuccessRate = findIdx(['success_rate']);
+  const iFailRate = findIdx(['fail_rate']);
+  if (iIdc === -1 || iProject === -1) return [];
+
+  return rows.map((r) => ({
+    dt: normalizeCloudTaskDateKey(r[iDt]),
+    idcId: String(r[iIdc] ?? '').trim(),
+    projectId: normalizeProjectIdValue(r[iProject]),
+    successCnt: Number(r[iSuccessCnt] ?? NaN),
+    failCnt: Number(r[iFailCnt] ?? NaN),
+    totalCnt: Number(r[iTotalCnt] ?? NaN),
+    successRate: Number(r[iSuccessRate] ?? NaN),
+    failRate: Number(r[iFailRate] ?? NaN),
+  }));
+}
+
 const CLOUD_ROOM_NAME_TO_ID = {
   华北A: 'IDC-BJ-A',
   华东B: 'IDC-SH-B',
@@ -813,6 +881,70 @@ function buildCloudTrendByPeriod(baseTrend, days, successShift = 0, durationScal
       avgDuration,
     };
   });
+}
+
+function normalizeProjectIdValue(raw) {
+  return String(raw ?? '')
+    .replace(/\[/g, '')
+    .replace(/\]/g, '')
+    .replace(/"/g, '')
+    .replace(/'/g, '')
+    .trim();
+}
+
+function splitProjectIdTokens(raw) {
+  const cleaned = normalizeProjectIdValue(raw);
+  if (!cleaned) return [];
+  return cleaned
+    .split(/[,\s|;/，、]+/g)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function normalizeCloudTaskDateKey(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  const matched = s.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (matched) {
+    const mm = matched[2].padStart(2, '0');
+    const dd = matched[3].padStart(2, '0');
+    return `${mm}-${dd}`;
+  }
+  return normalizeDateKey(s);
+}
+
+function formatAdaptiveDuration(seconds, digits = 1) {
+  const sec = Number(seconds);
+  if (!Number.isFinite(sec) || sec < 0) return '0.0s';
+  if (sec < 60) return `${sec.toFixed(digits)}s`;
+  if (sec < 3600) {
+    const m = Math.floor(sec / 60);
+    const s = sec - m * 60;
+    return s >= 0.05 ? `${m}m ${s.toFixed(digits)}s` : `${m}m`;
+  }
+  if (sec < 86400) {
+    const h = Math.floor(sec / 3600);
+    const m = (sec - h * 3600) / 60;
+    return m >= 0.05 ? `${h}h ${m.toFixed(digits)}m` : `${h}h`;
+  }
+  const d = Math.floor(sec / 86400);
+  const h = (sec - d * 86400) / 3600;
+  return h >= 0.05 ? `${d}d ${h.toFixed(digits)}h` : `${d}d`;
+}
+
+function getDurationAxisMode(maxSeconds) {
+  const maxSec = Number(maxSeconds);
+  if (!Number.isFinite(maxSec) || maxSec < 120) return 's';
+  if (maxSec < 7200) return 'min';
+  return 'h';
+}
+
+function formatDurationByAxis(seconds, mode, digits = 1) {
+  const sec = Number(seconds);
+  if (!Number.isFinite(sec) || sec < 0) return `0.0${mode}`;
+  if (mode === 'min') return `${(sec / 60).toFixed(digits)}m`;
+  if (mode === 'h') return `${(sec / 3600).toFixed(digits)}h`;
+  return `${sec.toFixed(digits)}s`;
 }
 const overallAvailability = generateTrendData(14, 95, 2);
 
@@ -1051,6 +1183,58 @@ GROUP BY
 ORDER BY
   coms_purchase_order_settlement_view.date ASC,
   coms_purchase_order_settlement_view.id ASC`;
+
+const CLOUD_TASK_DEPLOY_DB_ID = Number(
+  import.meta.env.VITE_METABASE_CLOUD_TASK_DEPLOY_DB_ID || 97,
+);
+const CLOUD_TASK_DEPLOY_DURATION_SQL = `SELECT
+    dt,
+    idcId,
+    idcName,
+    REPLACE(REPLACE(projectId, '[', ''), ']', '') AS projectId,
+    AVG(TIMESTAMPDIFF(SECOND, started_at, ended_at)) AS avg_duration,
+    MAX(TIMESTAMPDIFF(SECOND, started_at, ended_at)) AS max_duration,
+    MIN(TIMESTAMPDIFF(SECOND, started_at, ended_at)) AS min_duration
+FROM dwd_cgboss_task_info_1d
+WHERE dt >= date(date_add(now(6), INTERVAL -7 day))
+  AND dt < date(date_add(now(6), INTERVAL 1 day))
+  AND pstage = 'psDeploy'
+  AND started_at IS NOT NULL
+  AND ended_at IS NOT NULL
+  AND ended_at > started_at
+GROUP BY
+    dt,
+    idcId,
+    idcName,
+    REPLACE(REPLACE(projectId, '[', ''), ']', '')
+ORDER BY
+    dt,
+    idcId,
+    projectId;`;
+
+const CLOUD_TASK_DEPLOY_SUCCESS_SQL = `SELECT
+    dt,
+    idcId,
+    REPLACE(REPLACE(projectId, '[', ''), ']', '') AS projectId,
+    SUM(CASE WHEN status = 231 THEN 1 ELSE 0 END) AS success_cnt,
+    SUM(CASE WHEN status = 232 THEN 1 ELSE 0 END) AS fail_cnt,
+    SUM(CASE WHEN status IN (231, 232) THEN 1 ELSE 0 END) AS total_cnt,
+    SUM(CASE WHEN status = 231 THEN 1 ELSE 0 END) * 1.0
+        / NULLIF(SUM(CASE WHEN status IN (231, 232) THEN 1 ELSE 0 END), 0) AS success_rate,
+    SUM(CASE WHEN status = 232 THEN 1 ELSE 0 END) * 1.0
+        / NULLIF(SUM(CASE WHEN status IN (231, 232) THEN 1 ELSE 0 END), 0) AS fail_rate
+FROM dwd_cgboss_task_info_1d
+WHERE dt >= date(date_add(now(6), INTERVAL -7 day))
+  AND dt < date(date_add(now(6), INTERVAL 1 day))
+  AND pstage = 'psDeploy'
+GROUP BY
+    dt,
+    idcId,
+    REPLACE(REPLACE(projectId, '[', ''), ']', '')
+ORDER BY
+    dt,
+    idcId,
+    projectId;`;
 
 const INSTANCE_CURRENT_DB_ID = Number(import.meta.env.VITE_METABASE_INSTANCE_CURRENT_DB_ID || 131);
 const INSTANCE_AVAILABILITY_7D_DB_ID = Number(import.meta.env.VITE_METABASE_INSTANCE_AVAILABILITY_7D_DB_ID || 131);
@@ -1660,21 +1844,153 @@ const SchedulingView = () => (
 );
 
 // 3. 游戏云化任务 (Cloudification Tasks)
-const CloudTaskView = () => {
-  const phaseList = CLOUD_TASK_PHASES;
-  const cloudProjectOptions = useMemo(
-    () => [
+const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
+  const phaseList = useMemo(() => {
+    if (!Array.isArray(deployLiveRows) || deployLiveRows.length === 0) return CLOUD_TASK_PHASES;
+    const deploy = CLOUD_TASK_PHASES.find((p) => p.id === 'deploy');
+    if (!deploy) return CLOUD_TASK_PHASES;
+
+    const validRows = deployLiveRows.filter(
+      (r) =>
+        Number.isFinite(r?.totalCnt) &&
+        r.totalCnt > 0 &&
+        Number.isFinite(r?.avgDuration),
+    );
+    if (validRows.length === 0) return CLOUD_TASK_PHASES;
+
+    const totalTasks = validRows.reduce((s, r) => s + r.totalCnt, 0);
+    const successTasks = validRows.reduce(
+      (s, r) => s + (Number.isFinite(r.successCnt) ? r.successCnt : 0),
+      0,
+    );
+    const weightedAvg =
+      validRows.reduce((s, r) => s + r.avgDuration * r.totalCnt, 0) /
+      Math.max(totalTasks, 1);
+
+    const maxDuration = validRows.reduce(
+      (max, r) => Math.max(max, Number.isFinite(r.maxDuration) ? r.maxDuration : 0),
+      0,
+    );
+    const minDuration = validRows.reduce((min, r) => {
+      if (!Number.isFinite(r.minDuration)) return min;
+      return Math.min(min, r.minDuration);
+    }, Number.MAX_SAFE_INTEGER);
+
+    const roomAgg = {};
+    validRows.forEach((r) => {
+      const idcKey = String(r.idcId || '未知机房');
+      if (!roomAgg[idcKey]) {
+        roomAgg[idcKey] = {
+          name: idcKey,
+          avgDurationWeighted: 0,
+          tasks: 0,
+          successCnt: 0,
+          failCnt: 0,
+        };
+      }
+      roomAgg[idcKey].tasks += r.totalCnt;
+      roomAgg[idcKey].avgDurationWeighted += r.avgDuration * r.totalCnt;
+      roomAgg[idcKey].successCnt += Number.isFinite(r.successCnt) ? r.successCnt : 0;
+      roomAgg[idcKey].failCnt += Number.isFinite(r.failCnt) ? r.failCnt : 0;
+    });
+    const roomBreakdown = Object.entries(roomAgg).map(([name, rec]) => {
+      const successRate = rec.tasks > 0 ? (rec.successCnt / rec.tasks) * 100 : 0;
+      const failRate = rec.tasks > 0 ? (rec.failCnt / rec.tasks) * 100 : 0;
+      return {
+        name,
+        avgDuration: rec.tasks > 0 ? rec.avgDurationWeighted / rec.tasks : 0,
+        successRate,
+        failRate,
+        tasks: rec.tasks,
+      };
+    });
+
+    const mapped = CLOUD_TASK_PHASES.map((phase) => {
+      if (phase.id !== 'deploy') return phase;
+      return {
+        ...phase,
+        aliases: `${phase.aliases}（实时）`,
+        dataSource: 'live',
+        liveRows: validRows,
+        totalTasks,
+        avgDuration: Number(weightedAvg.toFixed(1)),
+        successRate: Number(((successTasks / Math.max(totalTasks, 1)) * 100).toFixed(2)),
+        roomBreakdown,
+        trend: buildCloudTrendByPeriod(
+          deploy.trend,
+          7,
+          Number((((successTasks / Math.max(totalTasks, 1)) * 100) - deploy.successRate).toFixed(2)),
+          Number((weightedAvg / Math.max(deploy.avgDuration, 1)).toFixed(4)),
+        ),
+        maxDuration: Number(maxDuration.toFixed(1)),
+        minDuration: Number(
+          (minDuration === Number.MAX_SAFE_INTEGER ? deploy.avgDuration : minDuration).toFixed(1),
+        ),
+      };
+    });
+    const deployFirst = mapped.find((p) => p.id === 'deploy');
+    const others = mapped.filter((p) => p.id !== 'deploy');
+    return deployFirst ? [deployFirst, ...others] : mapped;
+  }, [deployLiveRows]);
+  const cloudProjectOptions = useMemo(() => {
+    const map = new Map();
+    (projectNameOptions || []).forEach((p) => {
+      const pid = String(p?.id ?? '').trim();
+      const pname = String(p?.name ?? '').trim();
+      if (!pid) return;
+      map.set(pid, pname ? `${pname} (${pid})` : `项目 ${pid}`);
+    });
+    projects.forEach((p) => {
+      const pid = String(p.id);
+      if (!map.has(pid)) map.set(pid, `${p.name} (${pid})`);
+    });
+    (deployLiveRows || []).forEach((r) => {
+      splitProjectIdTokens(r?.projectId).forEach((pid) => {
+        if (!pid || map.has(pid)) return;
+        map.set(pid, `项目 ${pid}`);
+      });
+    });
+    return [
       { id: 'all', label: '全部项目' },
-      ...projects.map((p) => ({ id: String(p.id), label: `${p.name} (${p.id})` })),
-    ],
-    [],
-  );
+      ...Array.from(map.entries()).map(([id, label]) => ({ id, label })),
+    ];
+  }, [deployLiveRows, projectNameOptions]);
+  const deployProjectOptions = useMemo(() => {
+    const map = new Map();
+    const nameMap = new Map();
+    (projectNameOptions || []).forEach((p) => {
+      const pid = String(p?.id ?? '').trim();
+      const pname = String(p?.name ?? '').trim();
+      if (pid) nameMap.set(pid, pname || `项目 ${pid}`);
+    });
+    projects.forEach((p) => {
+      const pid = String(p?.id ?? '').trim();
+      if (pid && !nameMap.has(pid)) nameMap.set(pid, p.name || `项目 ${pid}`);
+    });
+    (deployLiveRows || []).forEach((r) => {
+      const successCnt = Number(r?.successCnt ?? 0);
+      if (!Number.isFinite(successCnt) || successCnt <= 0) return;
+      splitProjectIdTokens(r?.projectId).forEach((pid) => {
+        if (!pid || map.has(pid)) return;
+        map.set(pid, `${nameMap.get(pid) || `项目 ${pid}`} (${pid})`);
+      });
+    });
+    const list = Array.from(map.entries())
+      .map(([id, label]) => ({ id, label }))
+      .sort((a, b) => String(a.id).localeCompare(String(b.id), 'zh-CN'));
+    return [{ id: 'all', label: '全部项目' }, ...list];
+  }, [deployLiveRows, projectNameOptions]);
   const [phaseFilters, setPhaseFilters] = useState(() =>
     Object.fromEntries(
       phaseList.map((phase) => [
         phase.id,
         { projectId: 'all', gameSetId: 'all', periodDays: '7' },
       ]),
+    ),
+  );
+  const [phaseSorters, setPhaseSorters] = useState(() =>
+    Object.fromEntries(
+      phaseList.map((phase) => [phase.id, { key: 'avgDuration', order: 'desc' }]),
     ),
   );
   const [expandedPhaseIds, setExpandedPhaseIds] = useState(() =>
@@ -1685,7 +2001,11 @@ const CloudTaskView = () => {
     setPhaseFilters((prev) => ({
       ...prev,
       [phaseId]: {
-        ...(prev[phaseId] || { projectId: 'all', gameSetId: 'all', periodDays: '7' }),
+        ...(prev[phaseId] || {
+          projectId: 'all',
+          gameSetId: 'all',
+          periodDays: '7',
+        }),
         [key]: value,
       },
     }));
@@ -1695,6 +2015,31 @@ const CloudTaskView = () => {
       prev.includes(phaseId) ? prev.filter((id) => id !== phaseId) : [...prev, phaseId],
     );
   }, []);
+  const togglePhaseSort = useCallback((phaseId, sortKey) => {
+    setPhaseSorters((prev) => {
+      const cur = prev[phaseId] || { key: 'avgDuration', order: 'desc' };
+      const nextOrder =
+        cur.key === sortKey ? (cur.order === 'asc' ? 'desc' : 'asc') : 'desc';
+      return {
+        ...prev,
+        [phaseId]: { key: sortKey, order: nextOrder },
+      };
+    });
+  }, []);
+  const renderSortLabel = useCallback(
+    (phaseId, sortKey, label) => {
+      const sorter = phaseSorters[phaseId] || { key: 'avgDuration', order: 'desc' };
+      const active = sorter.key === sortKey;
+      const arrow = active ? (sorter.order === 'asc' ? '↑' : '↓') : '';
+      return (
+        <span className={`inline-flex items-center gap-1 ${active ? 'text-[#171717]' : 'text-[#666666]'}`}>
+          <span>{label}</span>
+          <span className={`text-[10px] ${active ? 'text-[#171717]' : 'text-slate-300'}`}>{arrow || '·'}</span>
+        </span>
+      );
+    },
+    [phaseSorters],
+  );
 
   const stageViews = useMemo(() => {
     return phaseList.map((phase) => {
@@ -1703,12 +2048,220 @@ const CloudTaskView = () => {
         gameSetId: 'all',
         periodDays: '7',
       };
+      const isLiveDeploy = phase.id === 'deploy' && phase.dataSource === 'live';
+      const periodDays = Number(filter.periodDays || 7);
+
+      if (isLiveDeploy) {
+        const liveRows = Array.isArray(phase.liveRows) ? phase.liveRows : [];
+        const rowsByProject =
+          filter.projectId === 'all'
+            ? liveRows
+            : liveRows.filter((r) =>
+                splitProjectIdTokens(r.projectId).includes(String(filter.projectId)),
+              );
+        const labels = buildRecentDayLabels(periodDays);
+        const labelSet = new Set(labels);
+        const durationRows = rowsByProject.filter(
+          (r) =>
+            labelSet.has(String(r.dt || '')) &&
+            Number.isFinite(r.avgDuration),
+        );
+        const successRows = rowsByProject.filter(
+          (r) =>
+            labelSet.has(String(r.dt || '')) &&
+            Number.isFinite(r.totalCnt) &&
+            r.totalCnt > 0,
+        );
+        const totalTasks = successRows.reduce((s, r) => s + r.totalCnt, 0);
+        const successTasks = successRows.reduce(
+          (s, r) => s + (Number.isFinite(r.successCnt) ? r.successCnt : 0),
+          0,
+        );
+        const successRate =
+          totalTasks > 0 ? Number(((successTasks / totalTasks) * 100).toFixed(2)) : 0;
+        const idcDurationAgg = {};
+        durationRows.forEach((r) => {
+          const idcKey = String(r.idcId || '未知机房');
+          if (!idcDurationAgg[idcKey]) idcDurationAgg[idcKey] = { sum: 0, count: 0 };
+          idcDurationAgg[idcKey].sum += r.avgDuration;
+          idcDurationAgg[idcKey].count += 1;
+        });
+        const idcAvgDurations = Object.values(idcDurationAgg).map((rec) =>
+          rec.count > 0 ? rec.sum / rec.count : 0,
+        );
+        const avgDuration =
+          idcAvgDurations.length > 0
+            ? Number(
+                (
+                  idcAvgDurations.reduce((s, v) => s + v, 0) /
+                  idcAvgDurations.length
+                ).toFixed(1),
+              )
+            : 0;
+        const maxDuration = durationRows.reduce(
+          (max, r) => Math.max(max, Number.isFinite(r.maxDuration) ? r.maxDuration : 0),
+          0,
+        );
+        const minDurationRaw = durationRows.reduce((min, r) => {
+          if (!Number.isFinite(r.minDuration)) return min;
+          return Math.min(min, r.minDuration);
+        }, Number.MAX_SAFE_INTEGER);
+        const minDuration =
+          minDurationRaw === Number.MAX_SAFE_INTEGER ? 0 : Number(minDurationRaw.toFixed(1));
+
+        const byDay = {};
+        durationRows.forEach((r) => {
+          const day = String(r.dt || '');
+          if (!day) return;
+          if (!byDay[day]) {
+            byDay[day] = {
+              successCnt: 0,
+              failCnt: 0,
+              totalCnt: 0,
+              idcDurationAgg: {},
+            };
+          }
+          const idcKey = String(r.idcId || '未知机房');
+          if (!byDay[day].idcDurationAgg[idcKey]) {
+            byDay[day].idcDurationAgg[idcKey] = { sum: 0, count: 0 };
+          }
+          byDay[day].idcDurationAgg[idcKey].sum += r.avgDuration;
+          byDay[day].idcDurationAgg[idcKey].count += 1;
+        });
+        successRows.forEach((r) => {
+          const day = String(r.dt || '');
+          if (!day) return;
+          if (!byDay[day]) {
+            byDay[day] = {
+              successCnt: 0,
+              failCnt: 0,
+              totalCnt: 0,
+              idcDurationAgg: {},
+            };
+          }
+          byDay[day].successCnt += Number.isFinite(r.successCnt) ? r.successCnt : 0;
+          byDay[day].failCnt += Number.isFinite(r.failCnt) ? r.failCnt : 0;
+          byDay[day].totalCnt += Number.isFinite(r.totalCnt) ? r.totalCnt : 0;
+        });
+        const trend = labels.map((day) => {
+          const rec = byDay[day];
+          if (!rec) {
+            return { time: day, successRate: 0, failRate: 0, avgDuration: 0 };
+          }
+          const daySuccessRate =
+            rec.totalCnt > 0 ? (rec.successCnt / rec.totalCnt) * 100 : 0;
+          const dayFailRate =
+            rec.totalCnt > 0 ? (rec.failCnt / rec.totalCnt) * 100 : 0;
+          const dayIdcAverages = Object.values(rec.idcDurationAgg).map((v) =>
+            v.count > 0 ? v.sum / v.count : 0,
+          );
+          const dayAvgDuration =
+            dayIdcAverages.length > 0
+              ? dayIdcAverages.reduce((s, v) => s + v, 0) / dayIdcAverages.length
+              : 0;
+          return {
+            time: day,
+            successRate: Number(daySuccessRate.toFixed(2)),
+            failRate: Number(dayFailRate.toFixed(2)),
+            avgDuration: Number(dayAvgDuration.toFixed(1)),
+          };
+        });
+
+        const roomAgg = {};
+        durationRows.forEach((r) => {
+          const roomId = String(r.idcId || '未知机房');
+          const roomName = String(r.idcName || roomId || '未知机房');
+          if (!roomAgg[roomId]) {
+            roomAgg[roomId] = {
+              roomId,
+              roomName,
+              tasks: 0,
+              successCnt: 0,
+              failCnt: 0,
+              avgDurationSum: 0,
+              durationCount: 0,
+              maxDuration: 0,
+              minDuration: Number.MAX_SAFE_INTEGER,
+            };
+          }
+          roomAgg[roomId].roomName = roomName;
+          roomAgg[roomId].avgDurationSum += r.avgDuration;
+          roomAgg[roomId].durationCount += 1;
+          roomAgg[roomId].maxDuration = Math.max(
+            roomAgg[roomId].maxDuration,
+            Number.isFinite(r.maxDuration) ? r.maxDuration : 0,
+          );
+          if (Number.isFinite(r.minDuration)) {
+            roomAgg[roomId].minDuration = Math.min(roomAgg[roomId].minDuration, r.minDuration);
+          }
+        });
+        successRows.forEach((r) => {
+          const roomId = String(r.idcId || '未知机房');
+          if (!roomAgg[roomId]) {
+            roomAgg[roomId] = {
+              roomId,
+              roomName: roomId,
+              tasks: 0,
+              successCnt: 0,
+              failCnt: 0,
+              avgDurationSum: 0,
+              durationCount: 0,
+              maxDuration: 0,
+              minDuration: Number.MAX_SAFE_INTEGER,
+            };
+          }
+          roomAgg[roomId].tasks += Number.isFinite(r.totalCnt) ? r.totalCnt : 0;
+          roomAgg[roomId].successCnt += Number.isFinite(r.successCnt) ? r.successCnt : 0;
+          roomAgg[roomId].failCnt += Number.isFinite(r.failCnt) ? r.failCnt : 0;
+        });
+        let roomBreakdown = Object.values(roomAgg).map((rec) => {
+          const roomSuccessRate = rec.tasks > 0 ? (rec.successCnt / rec.tasks) * 100 : 0;
+          const roomFailRate = rec.tasks > 0 ? (rec.failCnt / rec.tasks) * 100 : 0;
+          return {
+            roomId: rec.roomId,
+            roomName: rec.roomName,
+            name: rec.roomName,
+            tasks: rec.tasks,
+            avgDuration:
+              rec.durationCount > 0
+                ? Number((rec.avgDurationSum / rec.durationCount).toFixed(1))
+                : 0,
+            successRate: Number(roomSuccessRate.toFixed(2)),
+            failRate: Number(roomFailRate.toFixed(2)),
+            successCnt: rec.successCnt,
+            failCnt: rec.failCnt,
+            maxDuration: Number(rec.maxDuration.toFixed(1)),
+            minDuration: Number(
+              (rec.minDuration === Number.MAX_SAFE_INTEGER ? 0 : rec.minDuration).toFixed(1),
+            ),
+          };
+        });
+        const sorter = phaseSorters[phase.id] || { key: 'avgDuration', order: 'desc' };
+        roomBreakdown = roomBreakdown
+          .slice()
+          .sort((a, b) => {
+            const av = Number(a?.[sorter.key] ?? 0);
+            const bv = Number(b?.[sorter.key] ?? 0);
+            return sorter.order === 'asc' ? av - bv : bv - av;
+          });
+        return {
+          ...phase,
+          filter,
+          trend,
+          successRate,
+          avgDuration,
+          totalTasks,
+          failRate: Number((100 - successRate).toFixed(2)),
+          maxDuration: Number(maxDuration.toFixed(1)),
+          minDuration,
+          roomBreakdown,
+        };
+      }
 
       const projectSeed = filter.projectId === 'all' ? 0 : Number(filter.projectId) % 9;
       const gameSetSeed = filter.gameSetId === 'all' ? 0 : Number(filter.gameSetId.replace(/[^\d]/g, '')) % 7;
       const successShift = projectSeed * 0.08 - gameSetSeed * 0.05;
       const durationScale = 1 + (gameSetSeed - 3) * 0.015 + (projectSeed - 4) * 0.01;
-      const periodDays = Number(filter.periodDays || 7);
 
       const successRate = Math.max(
         80,
@@ -1726,9 +2279,27 @@ const CloudTaskView = () => {
         successShift,
         durationScale,
       );
-      const maxDuration = trend.reduce((max, item) => Math.max(max, Number(item.avgDuration) || 0), 0);
-      const minDuration = trend.reduce((min, item) => Math.min(min, Number(item.avgDuration) || Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
-      const roomBreakdown = phase.roomBreakdown.map((row) => {
+      const trendMaxDuration = trend.reduce(
+        (max, item) => Math.max(max, Number(item.avgDuration) || 0),
+        0,
+      );
+      const trendMinDuration = trend.reduce(
+        (min, item) =>
+          Math.min(min, Number(item.avgDuration) || Number.MAX_SAFE_INTEGER),
+        Number.MAX_SAFE_INTEGER,
+      );
+      const maxDurationBase = Number.isFinite(phase.maxDuration)
+        ? Number(phase.maxDuration)
+        : trendMaxDuration;
+      const minDurationBase = Number.isFinite(phase.minDuration)
+        ? Number(phase.minDuration)
+        : trendMinDuration;
+      const maxDuration = Math.max(20, Number((maxDurationBase * durationScale).toFixed(1)));
+      const minDuration = Math.max(
+        1,
+        Number((minDurationBase * durationScale).toFixed(1)),
+      );
+      let roomBreakdown = phase.roomBreakdown.map((row) => {
         const rowSuccess = Math.max(
           80,
           Math.min(99.9, Number((row.successRate + successShift * 0.9).toFixed(2))),
@@ -1738,6 +2309,17 @@ const CloudTaskView = () => {
           1,
           Math.round(row.tasks * (periodDays / 7) * (filter.projectId === 'all' ? 1 : 0.28)),
         );
+        const rowSuccessCnt = Math.round((rowTasks * rowSuccess) / 100);
+        const rowFailCnt = Math.max(0, rowTasks - rowSuccessCnt);
+        const adjustSeed = (rowTasks % 7) * 0.01;
+        const rowMaxDuration = Math.max(
+          rowDuration,
+          Number((maxDuration * (0.97 + adjustSeed)).toFixed(1)),
+        );
+        const rowMinDuration = Math.max(
+          1,
+          Math.min(rowDuration, Number((minDuration * (0.97 + adjustSeed)).toFixed(1))),
+        );
         return {
           ...row,
           roomId: CLOUD_ROOM_NAME_TO_ID[row.name] || `IDC-${row.name}`,
@@ -1746,8 +2328,20 @@ const CloudTaskView = () => {
           failRate: Number((100 - rowSuccess).toFixed(2)),
           avgDuration: rowDuration,
           tasks: rowTasks,
+          successCnt: rowSuccessCnt,
+          failCnt: rowFailCnt,
+          maxDuration: rowMaxDuration,
+          minDuration: rowMinDuration,
         };
       });
+      const sorter = phaseSorters[phase.id] || { key: 'avgDuration', order: 'desc' };
+      roomBreakdown = roomBreakdown
+        .slice()
+        .sort((a, b) => {
+          const av = Number(a?.[sorter.key] ?? 0);
+          const bv = Number(b?.[sorter.key] ?? 0);
+          return sorter.order === 'asc' ? av - bv : bv - av;
+        });
 
       return {
         ...phase,
@@ -1757,19 +2351,18 @@ const CloudTaskView = () => {
         avgDuration,
         totalTasks,
         failRate: Number((100 - successRate).toFixed(2)),
-        maxDuration: Number(maxDuration.toFixed(1)),
-        minDuration: Number((minDuration === Number.MAX_SAFE_INTEGER ? 0 : minDuration).toFixed(1)),
+        maxDuration,
+        minDuration,
         roomBreakdown,
       };
     });
-  }, [phaseFilters, phaseList]);
+  }, [phaseFilters, phaseList, phaseSorters]);
 
   const globalTaskCount = stageViews.reduce((sum, p) => sum + p.totalTasks, 0);
   const globalAvgDuration =
     stageViews.reduce((sum, p) => sum + p.avgDuration * p.totalTasks, 0) / Math.max(globalTaskCount, 1);
   const globalSuccessRate =
     stageViews.reduce((sum, p) => sum + p.successRate * p.totalTasks, 0) / Math.max(globalTaskCount, 1);
-  const globalFailRate = Math.max(0, 100 - globalSuccessRate);
   const globalMaxDuration = Math.max(...stageViews.map((phase) => phase.maxDuration || 0));
   const globalMinDuration = Math.min(
     ...stageViews.map((phase) =>
@@ -1796,37 +2389,38 @@ const CloudTaskView = () => {
       };
     });
   }, [stageViews]);
+  const globalDurationAxisMode = useMemo(() => {
+    const maxSec = Math.max(...globalTrend.map((x) => Number(x?.avgDuration) || 0), 0);
+    return getDurationAxisMode(maxSec);
+  }, [globalTrend]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <Card className="p-5 sm:p-6">
         <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
           <div>
-            <h2 className="text-lg font-semibold flex items-center gap-2 text-blue-600">
-              <Zap className="w-5 h-5" /> 游戏云化任务指标看板（Mock）
+            <h2 className="text-lg font-semibold flex items-center gap-2 text-[#171717]">
+              <Zap className="w-5 h-5 text-[#0a72ef]" /> 游戏云化任务指标看板（Mock）
             </h2>
-            <p className="text-xs text-slate-500 mt-1">
+            <p className="text-xs text-slate-600 mt-1">
               口径：仅统计已完成子任务，默认近 7 天，可按项目筛选。耗时单位：秒。
             </p>
           </div>
           <div className="flex flex-wrap gap-2 text-xs">
-            <span className="px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-600">
+            <span className="px-2 py-1 rounded bg-white border border-slate-200 text-[#4d4d4d]">
               子任务总数 {globalTaskCount.toLocaleString()}
             </span>
-            <span className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+            <span className="px-2 py-1 rounded bg-[#ebf5ff] text-[#0068d6] border border-slate-200">
               成功率 {globalSuccessRate.toFixed(2)}%
             </span>
-            <span className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200">
-              失败率 {globalFailRate.toFixed(2)}%
+            <span className="px-2 py-1 rounded bg-white text-[#4d4d4d] border border-slate-200">
+              平均耗时 {formatAdaptiveDuration(globalAvgDuration, 1)}
             </span>
-            <span className="px-2 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200">
-              平均耗时 {globalAvgDuration.toFixed(1)}s
+            <span className="px-2 py-1 rounded bg-white text-[#4d4d4d] border border-slate-200">
+              最长耗时 {formatAdaptiveDuration(globalMaxDuration, 1)}
             </span>
-            <span className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">
-              最长耗时 {globalMaxDuration.toFixed(1)}s
-            </span>
-            <span className="px-2 py-1 rounded bg-sky-50 text-sky-700 border border-sky-200">
-              最短耗时 {(globalMinDuration === Number.MAX_SAFE_INTEGER ? 0 : globalMinDuration).toFixed(1)}s
+            <span className="px-2 py-1 rounded bg-white text-[#4d4d4d] border border-slate-200">
+              最短耗时 {formatAdaptiveDuration(globalMinDuration === Number.MAX_SAFE_INTEGER ? 0 : globalMinDuration, 1)}
             </span>
           </div>
         </div>
@@ -1835,7 +2429,7 @@ const CloudTaskView = () => {
       <Card className="p-4 sm:p-5">
         <div className="flex items-center gap-2 mb-3">
           <Clock className="w-4 h-4 text-slate-500" />
-          <h3 className="text-sm font-semibold text-slate-800">全阶段近 7 天总览趋势</h3>
+          <h3 className="text-sm font-semibold text-[#171717]">全阶段近 7 天总览趋势</h3>
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div className="h-52">
@@ -1854,7 +2448,7 @@ const CloudTaskView = () => {
             </ResponsiveContainer>
           </div>
           <div className="h-52">
-            <p className="text-xs text-slate-500 mb-2">平均耗时（秒）</p>
+            <p className="text-xs text-slate-500 mb-2">平均耗时（自适应单位）</p>
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={globalTrend}>
                 <defs>
@@ -1865,9 +2459,15 @@ const CloudTaskView = () => {
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                 <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} width={38} />
+                <YAxis
+                  tick={{ fontSize: 10, fill: '#64748b' }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={44}
+                  tickFormatter={(v) => formatDurationByAxis(v, globalDurationAxisMode, 1)}
+                />
                 <Tooltip
-                  formatter={(value) => [`${Number(value).toFixed(1)}s`, '平均耗时']}
+                  formatter={(value) => [formatAdaptiveDuration(value, 1), '平均耗时']}
                   contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
                 />
                 <Area type="monotone" dataKey="avgDuration" stroke="#0a72ef" fill="url(#cloudDurationGradient)" strokeWidth={2.2} isAnimationActive={false} />
@@ -1878,15 +2478,19 @@ const CloudTaskView = () => {
       </Card>
 
       <div className="space-y-4">
-        {stageViews.map((phase) => (
+        {stageViews.map((phase) => {
+          const phaseDurationAxisMode = getDurationAxisMode(
+            Math.max(...(phase.trend || []).map((x) => Number(x?.avgDuration) || 0), 0),
+          );
+          return (
           <Card key={phase.id} className="p-4 sm:p-5">
             <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
               <div>
-                <h3 className="text-base font-semibold text-slate-800">{phase.title}</h3>
-                <p className="text-xs text-slate-500 mt-1">{phase.aliases}</p>
+                <h3 className="text-base font-semibold text-[#171717]">{phase.title}</h3>
+                <p className="text-xs text-slate-600 mt-1">{phase.aliases}</p>
               </div>
               <div className="flex items-start gap-4">
-                <div className="text-xs text-slate-500 leading-5">
+                <div className="text-xs text-slate-600 leading-5">
                   <div>统计维度：{phase.scope}</div>
                   <div>统计对象：{phase.object}</div>
                   <div>统计状态：{phase.statusScope}</div>
@@ -1894,7 +2498,7 @@ const CloudTaskView = () => {
                 <button
                   type="button"
                   onClick={() => togglePhaseDetails(phase.id)}
-                  className="inline-flex items-center gap-1 rounded-md bg-white text-[#171717] border border-slate-200 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-slate-50"
+                  className="inline-flex items-center gap-1 rounded-md bg-white text-[#171717] border border-transparent px-3 py-1.5 text-xs font-medium shadow-[0_0_0_1px_rgba(0,0,0,0.08)] transition-colors hover:bg-slate-50"
                 >
                   {expandedPhaseIds.includes(phase.id) ? (
                     <>
@@ -1909,52 +2513,47 @@ const CloudTaskView = () => {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mt-4">
-              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                <p className="text-xs text-slate-500">全局平均耗时</p>
-                <p className="text-xl font-black text-slate-900 tabular-nums mt-1">{phase.avgDuration.toFixed(1)}s</p>
-                <p className="text-[11px] text-slate-500 mt-1">Σ(结束-开始)/子任务总数</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
+              <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-[0_0_0_1px_rgba(0,0,0,0.04)]">
+                <p className="text-xs text-slate-600">全局平均耗时</p>
+                <p className="text-xl font-black text-[#171717] tabular-nums mt-1">{formatAdaptiveDuration(phase.avgDuration, 1)}</p>
+                <p className="text-[11px] text-slate-600 mt-1">Σ(结束-开始)/子任务总数</p>
               </div>
-              <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
-                <p className="text-xs text-emerald-700">成功率</p>
-                <p className="text-xl font-black text-emerald-700 tabular-nums mt-1">{phase.successRate.toFixed(2)}%</p>
-                <p className="text-[11px] text-emerald-700 mt-1">成功子任务数 / 子任务总数</p>
+              <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-[0_0_0_1px_rgba(0,0,0,0.04)]">
+                <p className="text-xs text-[#0068d6]">成功率</p>
+                <p className="text-xl font-black text-[#0068d6] tabular-nums mt-1">{phase.successRate.toFixed(2)}%</p>
+                <p className="text-[11px] text-slate-600 mt-1">成功子任务数 / 子任务总数</p>
               </div>
-              <div className="rounded-lg border border-rose-200 bg-rose-50 p-3">
-                <p className="text-xs text-rose-700">失败率</p>
-                <p className="text-xl font-black text-rose-700 tabular-nums mt-1">{phase.failRate.toFixed(2)}%</p>
-                <p className="text-[11px] text-rose-700 mt-1">失败子任务数 / 子任务总数</p>
+              <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-[0_0_0_1px_rgba(0,0,0,0.04)]">
+                <p className="text-xs text-slate-600">最长耗时</p>
+                <p className="text-xl font-black text-[#171717] tabular-nums mt-1">{formatAdaptiveDuration(phase.maxDuration, 1)}</p>
+                <p className="text-[11px] text-slate-600 mt-1">周期内子任务耗时最大值</p>
               </div>
-              <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">
-                <p className="text-xs text-indigo-700">最长耗时</p>
-                <p className="text-xl font-black text-indigo-700 tabular-nums mt-1">{phase.maxDuration.toFixed(1)}s</p>
-                <p className="text-[11px] text-indigo-700 mt-1">周期内子任务耗时最大值</p>
-              </div>
-              <div className="rounded-lg border border-sky-200 bg-sky-50 p-3">
-                <p className="text-xs text-sky-700">最短耗时</p>
-                <p className="text-xl font-black text-sky-700 tabular-nums mt-1">{phase.minDuration.toFixed(1)}s</p>
-                <p className="text-[11px] text-sky-700 mt-1">周期内子任务耗时最小值</p>
+              <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-[0_0_0_1px_rgba(0,0,0,0.04)]">
+                <p className="text-xs text-slate-600">最短耗时</p>
+                <p className="text-xl font-black text-[#171717] tabular-nums mt-1">{formatAdaptiveDuration(phase.minDuration, 1)}</p>
+                <p className="text-[11px] text-slate-600 mt-1">周期内子任务耗时最小值</p>
               </div>
             </div>
 
             {expandedPhaseIds.includes(phase.id) && (
               <>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4 pt-4 border-t border-slate-100">
-                  <label className="text-xs text-slate-500">
+                  <label className="text-xs text-[#4d4d4d]">
                     项目筛选
                     <select
                       value={phase.filter.projectId}
                       onChange={(e) => updatePhaseFilter(phase.id, 'projectId', e.target.value)}
                       className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700"
                     >
-                      {cloudProjectOptions.map((opt) => (
+                      {(phase.id === 'deploy' ? deployProjectOptions : cloudProjectOptions).map((opt) => (
                         <option key={`project-${opt.id}`} value={opt.id}>
                           {opt.label}
                         </option>
                       ))}
                     </select>
                   </label>
-                  <label className="text-xs text-slate-500">
+                  <label className="text-xs text-[#4d4d4d]">
                     游戏集名称ID
                     <select
                       value={phase.filter.gameSetId}
@@ -1968,7 +2567,7 @@ const CloudTaskView = () => {
                       ))}
                     </select>
                   </label>
-                  <label className="text-xs text-slate-500">
+                  <label className="text-xs text-[#4d4d4d]">
                     周期筛选
                     <select
                       value={phase.filter.periodDays}
@@ -1986,7 +2585,7 @@ const CloudTaskView = () => {
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
                   <div className="h-48">
-                    <p className="text-xs text-slate-500 mb-2">成功率趋势（{phase.filter.periodDays}天）</p>
+                    <p className="text-xs text-[#4d4d4d] mb-2">成功率趋势（{phase.filter.periodDays}天）</p>
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={phase.trend}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
@@ -2001,7 +2600,7 @@ const CloudTaskView = () => {
                     </ResponsiveContainer>
                   </div>
                   <div className="h-48">
-                    <p className="text-xs text-slate-500 mb-2">平均耗时趋势（{phase.filter.periodDays}天）</p>
+                    <p className="text-xs text-[#4d4d4d] mb-2">平均耗时趋势（{phase.filter.periodDays}天，自适应单位）</p>
                     <ResponsiveContainer width="100%" height="100%">
                       <AreaChart data={phase.trend}>
                         <defs>
@@ -2012,9 +2611,15 @@ const CloudTaskView = () => {
                         </defs>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                         <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                        <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} width={36} />
+                        <YAxis
+                          tick={{ fontSize: 10, fill: '#64748b' }}
+                          axisLine={false}
+                          tickLine={false}
+                          width={44}
+                          tickFormatter={(v) => formatDurationByAxis(v, phaseDurationAxisMode, 1)}
+                        />
                         <Tooltip
-                          formatter={(value) => [`${Number(value).toFixed(1)}s`, '平均耗时']}
+                          formatter={(value) => [formatAdaptiveDuration(value, 1), '平均耗时']}
                           contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
                         />
                         <Area
@@ -2031,29 +2636,60 @@ const CloudTaskView = () => {
                 </div>
 
                 <div className="mt-4 rounded-lg border border-slate-200 overflow-hidden">
-                  <div className="px-3 py-2 bg-slate-50 text-xs font-medium text-slate-600">
-                    机房分组样本（Mock）
+                  <div className="px-3 py-2 bg-slate-50 text-xs font-medium text-[#4d4d4d]">
+                    机房分组明细
                   </div>
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-slate-500 border-b border-slate-100">
-                        <th className="py-2 px-3 text-left font-medium">机房ID</th>
-                        <th className="py-2 px-3 text-left font-medium">机房名称</th>
-                        <th className="py-2 px-3 text-right font-medium">任务数</th>
-                        <th className="py-2 px-3 text-right font-medium">平均耗时(s)</th>
-                        <th className="py-2 px-3 text-right font-medium">成功率</th>
-                        <th className="py-2 px-3 text-right font-medium">失败率</th>
+                        <th className="py-2 px-3 text-left font-medium text-slate-600">机房ID</th>
+                        <th className="py-2 px-3 text-left font-medium text-slate-600">机房名称</th>
+                        <th
+                          className="py-2 px-3 text-right font-medium cursor-pointer select-none"
+                          onClick={() => togglePhaseSort(phase.id, 'tasks')}
+                        >
+                          {renderSortLabel(phase.id, 'tasks', '任务数')}
+                        </th>
+                        <th className="py-2 px-3 text-right font-medium">成功任务数</th>
+                        <th className="py-2 px-3 text-right font-medium">失败任务数</th>
+                        <th
+                          className="py-2 px-3 text-right font-medium cursor-pointer select-none"
+                          onClick={() => togglePhaseSort(phase.id, 'avgDuration')}
+                        >
+                          {renderSortLabel(phase.id, 'avgDuration', '平均耗时')}
+                        </th>
+                        <th
+                          className="py-2 px-3 text-right font-medium cursor-pointer select-none"
+                          onClick={() => togglePhaseSort(phase.id, 'maxDuration')}
+                        >
+                          {renderSortLabel(phase.id, 'maxDuration', '最大耗时')}
+                        </th>
+                        <th
+                          className="py-2 px-3 text-right font-medium cursor-pointer select-none"
+                          onClick={() => togglePhaseSort(phase.id, 'minDuration')}
+                        >
+                          {renderSortLabel(phase.id, 'minDuration', '最小耗时')}
+                        </th>
+                        <th
+                          className="py-2 px-3 text-right font-medium cursor-pointer select-none"
+                          onClick={() => togglePhaseSort(phase.id, 'successRate')}
+                        >
+                          {renderSortLabel(phase.id, 'successRate', '成功率')}
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="text-slate-700">
                       {phase.roomBreakdown.map((row) => (
-                        <tr key={`${phase.id}-${row.roomId}`} className="border-b border-slate-100 last:border-0">
-                          <td className="py-2 px-3 font-mono text-xs">{row.roomId}</td>
-                          <td className="py-2 px-3">{row.roomName}</td>
+                        <tr key={`${phase.id}-${row.roomId}`} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/40">
+                          <td className="py-2 px-3 font-mono text-xs text-[#4d4d4d]">{row.roomId}</td>
+                          <td className="py-2 px-3 text-[#171717]">{row.roomName}</td>
                           <td className="py-2 px-3 text-right tabular-nums">{row.tasks.toLocaleString()}</td>
-                          <td className="py-2 px-3 text-right tabular-nums">{row.avgDuration.toFixed(1)}</td>
-                          <td className="py-2 px-3 text-right tabular-nums text-emerald-600">{row.successRate.toFixed(2)}%</td>
-                          <td className="py-2 px-3 text-right tabular-nums text-rose-600">{row.failRate.toFixed(2)}%</td>
+                          <td className="py-2 px-3 text-right tabular-nums">{Number(row.successCnt || 0).toLocaleString()}</td>
+                          <td className="py-2 px-3 text-right tabular-nums">{Number(row.failCnt || 0).toLocaleString()}</td>
+                          <td className="py-2 px-3 text-right tabular-nums">{formatAdaptiveDuration(row.avgDuration, 1)}</td>
+                          <td className="py-2 px-3 text-right tabular-nums">{formatAdaptiveDuration(Number(row.maxDuration || 0), 1)}</td>
+                          <td className="py-2 px-3 text-right tabular-nums">{formatAdaptiveDuration(Number(row.minDuration || 0), 1)}</td>
+                          <td className="py-2 px-3 text-right tabular-nums text-[#0068d6]">{row.successRate.toFixed(2)}%</td>
                         </tr>
                       ))}
                     </tbody>
@@ -2062,7 +2698,8 @@ const CloudTaskView = () => {
               </>
             )}
           </Card>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -2513,6 +3150,7 @@ export default function App() {
   const [ordersByProjectDatePaas, setOrdersByProjectDatePaas] = useState(undefined);
   const [ordersByProjectDateYuanli, setOrdersByProjectDateYuanli] = useState(undefined);
   const [supplyEnv, setSupplyEnv] = useState(SUPPLY_ENV_PAAS);
+  const [cloudDeployLiveRows, setCloudDeployLiveRows] = useState([]);
   /** 企微映射更新后递增，驱动供应卡片按新 settlement→项目关系重算 */
   const [settlementMapEpoch, setSettlementMapEpoch] = useState(0);
   const supplyOrdersDatasetRef = useRef(null);
@@ -2520,6 +3158,49 @@ export default function App() {
 
   useEffect(() => {
     if (!useApi) setInstanceLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!useApi) {
+      setCloudDeployLiveRows([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const [durationDs, successDs] = await Promise.all([
+          queryMetabaseNative({
+            database: CLOUD_TASK_DEPLOY_DB_ID,
+            query: CLOUD_TASK_DEPLOY_DURATION_SQL,
+            audience: SUPPLY_ENV_PAAS,
+          }),
+          queryMetabaseNative({
+            database: CLOUD_TASK_DEPLOY_DB_ID,
+            query: CLOUD_TASK_DEPLOY_SUCCESS_SQL,
+            audience: SUPPLY_ENV_PAAS,
+          }),
+        ]);
+        if (cancelled) return;
+        const durationRows = parseCloudDeployDurationDataset(durationDs);
+        const successRows = parseCloudDeploySuccessDataset(successDs);
+        const merged = {};
+        durationRows.forEach((r) => {
+          const key = `${r.dt || ''}__${r.idcId}__${r.projectId}`;
+          merged[key] = { ...r };
+        });
+        successRows.forEach((r) => {
+          const key = `${r.dt || ''}__${r.idcId}__${r.projectId}`;
+          merged[key] = { ...(merged[key] || {}), ...r };
+        });
+        setCloudDeployLiveRows(Object.values(merged));
+      } catch (e) {
+        console.warn('[云化任务-部署] 拉取实时数据失败，保留 mock 展示', e);
+        if (!cancelled) setCloudDeployLiveRows([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   /** 近 7 天订单/供应仍有一路未返回（用于界面内小 loading，不再整页骨架卡死） */
@@ -3215,7 +3896,10 @@ export default function App() {
                 )}
                 {tabPanel === 'tasks' && (
                   <div role="tabpanel" id="tabpanel-tasks">
-                    <CloudTaskView />
+              <CloudTaskView
+                deployLiveRows={cloudDeployLiveRows}
+                projectNameOptions={instanceProjectOptions}
+              />
                   </div>
                 )}
                 {tabPanel === 'instances' && (
