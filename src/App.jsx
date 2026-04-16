@@ -32,6 +32,7 @@ import {
   Users,
   Zap,
   Loader2,
+  X,
 } from 'lucide-react';
 
 import {
@@ -1184,10 +1185,10 @@ ORDER BY
   coms_purchase_order_settlement_view.date ASC,
   coms_purchase_order_settlement_view.id ASC`;
 
-const CLOUD_TASK_DEPLOY_DB_ID = Number(
+const CLOUD_TASK_LIVE_DB_ID = Number(
   import.meta.env.VITE_METABASE_CLOUD_TASK_DEPLOY_DB_ID || 97,
 );
-const CLOUD_TASK_DEPLOY_DURATION_SQL = `SELECT
+const CLOUD_TASK_DURATION_SQL_TEMPLATE = `SELECT
     dt,
     idcId,
     idcName,
@@ -1198,7 +1199,7 @@ const CLOUD_TASK_DEPLOY_DURATION_SQL = `SELECT
 FROM dwd_cgboss_task_info_1d
 WHERE dt >= date(date_add(now(6), INTERVAL -7 day))
   AND dt < date(date_add(now(6), INTERVAL 1 day))
-  AND pstage = 'psDeploy'
+  AND pstage = '__PSTAGE__'
   AND started_at IS NOT NULL
   AND ended_at IS NOT NULL
   AND ended_at > started_at
@@ -1212,21 +1213,21 @@ ORDER BY
     idcId,
     projectId;`;
 
-const CLOUD_TASK_DEPLOY_SUCCESS_SQL = `SELECT
+const CLOUD_TASK_SUCCESS_SQL_TEMPLATE = `SELECT
     dt,
     idcId,
     REPLACE(REPLACE(projectId, '[', ''), ']', '') AS projectId,
-    SUM(CASE WHEN status = 231 THEN 1 ELSE 0 END) AS success_cnt,
-    SUM(CASE WHEN status = 232 THEN 1 ELSE 0 END) AS fail_cnt,
-    SUM(CASE WHEN status IN (231, 232) THEN 1 ELSE 0 END) AS total_cnt,
-    SUM(CASE WHEN status = 231 THEN 1 ELSE 0 END) * 1.0
-        / NULLIF(SUM(CASE WHEN status IN (231, 232) THEN 1 ELSE 0 END), 0) AS success_rate,
-    SUM(CASE WHEN status = 232 THEN 1 ELSE 0 END) * 1.0
-        / NULLIF(SUM(CASE WHEN status IN (231, 232) THEN 1 ELSE 0 END), 0) AS fail_rate
+    SUM(CASE WHEN status = __SUCCESS_STATUS__ THEN 1 ELSE 0 END) AS success_cnt,
+    SUM(CASE WHEN status = __FAIL_STATUS__ THEN 1 ELSE 0 END) AS fail_cnt,
+    SUM(CASE WHEN status IN (__SUCCESS_STATUS__, __FAIL_STATUS__) THEN 1 ELSE 0 END) AS total_cnt,
+    SUM(CASE WHEN status = __SUCCESS_STATUS__ THEN 1 ELSE 0 END) * 1.0
+        / NULLIF(SUM(CASE WHEN status IN (__SUCCESS_STATUS__, __FAIL_STATUS__) THEN 1 ELSE 0 END), 0) AS success_rate,
+    SUM(CASE WHEN status = __FAIL_STATUS__ THEN 1 ELSE 0 END) * 1.0
+        / NULLIF(SUM(CASE WHEN status IN (__SUCCESS_STATUS__, __FAIL_STATUS__) THEN 1 ELSE 0 END), 0) AS fail_rate
 FROM dwd_cgboss_task_info_1d
 WHERE dt >= date(date_add(now(6), INTERVAL -7 day))
   AND dt < date(date_add(now(6), INTERVAL 1 day))
-  AND pstage = 'psDeploy'
+  AND pstage = '__PSTAGE__'
 GROUP BY
     dt,
     idcId,
@@ -1235,6 +1236,120 @@ ORDER BY
     dt,
     idcId,
     projectId;`;
+
+/** 各阶段成功/失败 status；未单独说明的阶段暂沿用部署口径 231/232 */
+const CLOUD_TASK_LIVE_PHASE_CONFIGS = [
+  { phaseId: 'deploy', pstage: 'psDeploy', successStatus: 231, failStatus: 232 },
+  { phaseId: 'accelerate', pstage: 'psBoost', successStatus: 291, failStatus: 292 },
+  { phaseId: 'disk-mount', pstage: 'psAttach', successStatus: 231, failStatus: 232 },
+  { phaseId: 'disk-dispatch', pstage: 'psDispatch', successStatus: 231, failStatus: 232 },
+];
+
+function cloudTaskSqlForStage(template, pstage) {
+  return String(template || '').replace(/__PSTAGE__/g, pstage);
+}
+
+function cloudTaskSuccessSql(template, { pstage, successStatus, failStatus }) {
+  return String(template || '')
+    .replace(/__PSTAGE__/g, pstage)
+    .replace(/__SUCCESS_STATUS__/g, String(successStatus))
+    .replace(/__FAIL_STATUS__/g, String(failStatus));
+}
+
+/** 从大表拉失败子任务行，用于主任务 ID + VMID 明细（与阶段失败 status 一致） */
+const CLOUD_TASK_FAILURE_DETAIL_ROW_LIMIT = 20000;
+const CLOUD_TASK_FAILURE_DETAIL_SQL_TEMPLATE = `SELECT
+    pitem_id,
+    vmId,
+    idcId
+FROM dwd_cgboss_task_info_1d
+WHERE dt >= date(date_add(now(6), INTERVAL -__PERIOD_DAYS__ day))
+  AND dt < date(date_add(now(6), INTERVAL 1 day))
+  AND pstage = '__PSTAGE__'
+  AND status = __FAIL_STATUS__
+  __PROJECT_PREDICATE__
+  __IDC_PREDICATE__
+ORDER BY
+    pitem_id,
+    vmId
+LIMIT __ROW_LIMIT__`;
+
+function cloudTaskFailureDetailSql(template, { periodDays, pstage, failStatus, projectId, idcId }) {
+  const days = Math.max(1, Math.min(90, Number(periodDays) || 7));
+  const pid = String(projectId ?? 'all').trim();
+  const projectPredicate =
+    pid === 'all'
+      ? 'AND 1 = 1'
+      : /^\d+$/.test(pid)
+        ? `AND FIND_IN_SET('${pid}', REPLACE(REPLACE(REPLACE(IFNULL(projectId, ''), '[', ''), ']', ''), ' ', '')) > 0`
+        : 'AND 1 = 0';
+  const idc = String(idcId ?? '').trim();
+  const idcPredicate =
+    idc && /^[a-zA-Z0-9\-_.]+$/.test(idc)
+      ? `AND idcId = '${idc.replace(/'/g, "''")}'`
+      : 'AND 1 = 1';
+  return String(template || '')
+    .replace(/__PERIOD_DAYS__/g, String(days))
+    .replace(/__PSTAGE__/g, pstage)
+    .replace(/__FAIL_STATUS__/g, String(failStatus))
+    .replace(/__PROJECT_PREDICATE__/g, projectPredicate)
+    .replace(/__IDC_PREDICATE__/g, idcPredicate)
+    .replace(/__ROW_LIMIT__/g, String(CLOUD_TASK_FAILURE_DETAIL_ROW_LIMIT));
+}
+
+function parseCloudTaskFailureDetailDataset(ds) {
+  const cols = ds?.data?.cols ?? [];
+  const rows = ds?.data?.rows ?? [];
+  const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9_]/g, '');
+  const findIdx = (keys) => {
+    const nkeys = keys.map(norm);
+    for (let i = 0; i < cols.length; i += 1) {
+      const name = norm(cols[i]?.name ?? cols[i]?.display_name ?? '');
+      if (!name) continue;
+      if (nkeys.some((k) => name.includes(k))) return i;
+    }
+    return -1;
+  };
+  const iPitem = findIdx(['pitem_id', 'pitemid']);
+  const iVm = findIdx(['vmid', 'vm_id']);
+  if (iPitem === -1) return [];
+
+  return rows.map((r) => ({
+    pitemId: String(iPitem === -1 ? '' : r[iPitem] ?? '').trim(),
+    vmIdRaw: iVm === -1 ? '' : r[iVm],
+  }));
+}
+
+function splitVmIdTokens(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return [];
+  return s
+    .split(/[,\s|;/，、]+/g)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function aggregateCloudTaskFailuresByPitem(rows) {
+  const map = new Map();
+  (rows || []).forEach((r) => {
+    const pkey = r.pitemId || '(空)';
+    if (!map.has(pkey)) {
+      map.set(pkey, { pitemId: pkey, vmIds: new Set() });
+    }
+    const rec = map.get(pkey);
+    splitVmIdTokens(r.vmIdRaw).forEach((v) => rec.vmIds.add(v));
+  });
+  return Array.from(map.values())
+    .map((rec) => ({
+      pitemId: rec.pitemId,
+      vmText: Array.from(rec.vmIds).join('，'),
+    }))
+    .sort((a, b) => String(a.pitemId).localeCompare(String(b.pitemId), 'zh-CN'));
+}
+
+function getCloudLivePhaseConfig(phaseId) {
+  return CLOUD_TASK_LIVE_PHASE_CONFIGS.find((c) => c.phaseId === phaseId) || null;
+}
 
 const INSTANCE_CURRENT_DB_ID = Number(import.meta.env.VITE_METABASE_INSTANCE_CURRENT_DB_ID || 131);
 const INSTANCE_AVAILABILITY_7D_DB_ID = Number(import.meta.env.VITE_METABASE_INSTANCE_AVAILABILITY_7D_DB_ID || 131);
@@ -1844,94 +1959,56 @@ const SchedulingView = () => (
 );
 
 // 3. 游戏云化任务 (Cloudification Tasks)
-const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
+const CloudTaskView = ({ liveRowsByPhase = {}, projectNameOptions = [] }) => {
   const phaseList = useMemo(() => {
-    if (!Array.isArray(deployLiveRows) || deployLiveRows.length === 0) return CLOUD_TASK_PHASES;
-    const deploy = CLOUD_TASK_PHASES.find((p) => p.id === 'deploy');
-    if (!deploy) return CLOUD_TASK_PHASES;
+    const liveOnly = CLOUD_TASK_PHASES
+      .filter((phase) => CLOUD_TASK_LIVE_PHASE_CONFIGS.some((cfg) => cfg.phaseId === phase.id))
+      .map((phase) => {
+        const phaseRows = Array.isArray(liveRowsByPhase?.[phase.id]) ? liveRowsByPhase[phase.id] : [];
+        const durationRows = phaseRows.filter((r) => Number.isFinite(r?.avgDuration));
+        const successRows = phaseRows.filter(
+          (r) => Number.isFinite(r?.totalCnt) && r.totalCnt > 0,
+        );
+        if (durationRows.length === 0) return null;
 
-    const validRows = deployLiveRows.filter(
-      (r) =>
-        Number.isFinite(r?.totalCnt) &&
-        r.totalCnt > 0 &&
-        Number.isFinite(r?.avgDuration),
-    );
-    if (validRows.length === 0) return CLOUD_TASK_PHASES;
+        const totalTasks = successRows.reduce((s, r) => s + r.totalCnt, 0);
+        const successTasks = successRows.reduce(
+          (s, r) => s + (Number.isFinite(r.successCnt) ? r.successCnt : 0),
+          0,
+        );
+        const weightedAvg =
+          durationRows.reduce((s, r) => s + r.avgDuration, 0) /
+          Math.max(durationRows.length, 1);
 
-    const totalTasks = validRows.reduce((s, r) => s + r.totalCnt, 0);
-    const successTasks = validRows.reduce(
-      (s, r) => s + (Number.isFinite(r.successCnt) ? r.successCnt : 0),
-      0,
-    );
-    const weightedAvg =
-      validRows.reduce((s, r) => s + r.avgDuration * r.totalCnt, 0) /
-      Math.max(totalTasks, 1);
+        const maxDuration = durationRows.reduce(
+          (max, r) => Math.max(max, Number.isFinite(r.maxDuration) ? r.maxDuration : 0),
+          0,
+        );
+        const minDuration = durationRows.reduce((min, r) => {
+          if (!Number.isFinite(r.minDuration)) return min;
+          return Math.min(min, r.minDuration);
+        }, Number.MAX_SAFE_INTEGER);
 
-    const maxDuration = validRows.reduce(
-      (max, r) => Math.max(max, Number.isFinite(r.maxDuration) ? r.maxDuration : 0),
-      0,
-    );
-    const minDuration = validRows.reduce((min, r) => {
-      if (!Number.isFinite(r.minDuration)) return min;
-      return Math.min(min, r.minDuration);
-    }, Number.MAX_SAFE_INTEGER);
-
-    const roomAgg = {};
-    validRows.forEach((r) => {
-      const idcKey = String(r.idcId || '未知机房');
-      if (!roomAgg[idcKey]) {
-        roomAgg[idcKey] = {
-          name: idcKey,
-          avgDurationWeighted: 0,
-          tasks: 0,
-          successCnt: 0,
-          failCnt: 0,
+        return {
+          ...phase,
+          aliases: `${phase.aliases}（实时）`,
+          dataSource: 'live',
+          liveRows: phaseRows,
+          totalTasks,
+          avgDuration: Number(weightedAvg.toFixed(1)),
+          successRate: Number(((successTasks / Math.max(totalTasks, 1)) * 100).toFixed(2)),
+          maxDuration: Number(maxDuration.toFixed(1)),
+          minDuration: Number(
+            (minDuration === Number.MAX_SAFE_INTEGER ? phase.avgDuration : minDuration).toFixed(1),
+          ),
         };
-      }
-      roomAgg[idcKey].tasks += r.totalCnt;
-      roomAgg[idcKey].avgDurationWeighted += r.avgDuration * r.totalCnt;
-      roomAgg[idcKey].successCnt += Number.isFinite(r.successCnt) ? r.successCnt : 0;
-      roomAgg[idcKey].failCnt += Number.isFinite(r.failCnt) ? r.failCnt : 0;
-    });
-    const roomBreakdown = Object.entries(roomAgg).map(([name, rec]) => {
-      const successRate = rec.tasks > 0 ? (rec.successCnt / rec.tasks) * 100 : 0;
-      const failRate = rec.tasks > 0 ? (rec.failCnt / rec.tasks) * 100 : 0;
-      return {
-        name,
-        avgDuration: rec.tasks > 0 ? rec.avgDurationWeighted / rec.tasks : 0,
-        successRate,
-        failRate,
-        tasks: rec.tasks,
-      };
-    });
+      })
+      .filter(Boolean);
 
-    const mapped = CLOUD_TASK_PHASES.map((phase) => {
-      if (phase.id !== 'deploy') return phase;
-      return {
-        ...phase,
-        aliases: `${phase.aliases}（实时）`,
-        dataSource: 'live',
-        liveRows: validRows,
-        totalTasks,
-        avgDuration: Number(weightedAvg.toFixed(1)),
-        successRate: Number(((successTasks / Math.max(totalTasks, 1)) * 100).toFixed(2)),
-        roomBreakdown,
-        trend: buildCloudTrendByPeriod(
-          deploy.trend,
-          7,
-          Number((((successTasks / Math.max(totalTasks, 1)) * 100) - deploy.successRate).toFixed(2)),
-          Number((weightedAvg / Math.max(deploy.avgDuration, 1)).toFixed(4)),
-        ),
-        maxDuration: Number(maxDuration.toFixed(1)),
-        minDuration: Number(
-          (minDuration === Number.MAX_SAFE_INTEGER ? deploy.avgDuration : minDuration).toFixed(1),
-        ),
-      };
-    });
-    const deployFirst = mapped.find((p) => p.id === 'deploy');
-    const others = mapped.filter((p) => p.id !== 'deploy');
-    return deployFirst ? [deployFirst, ...others] : mapped;
-  }, [deployLiveRows]);
+    const deployFirst = liveOnly.find((p) => p.id === 'deploy');
+    const others = liveOnly.filter((p) => p.id !== 'deploy');
+    return deployFirst ? [deployFirst, ...others] : liveOnly;
+  }, [liveRowsByPhase]);
   const cloudProjectOptions = useMemo(() => {
     const map = new Map();
     (projectNameOptions || []).forEach((p) => {
@@ -1944,19 +2021,20 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
       const pid = String(p.id);
       if (!map.has(pid)) map.set(pid, `${p.name} (${pid})`);
     });
-    (deployLiveRows || []).forEach((r) => {
-      splitProjectIdTokens(r?.projectId).forEach((pid) => {
-        if (!pid || map.has(pid)) return;
-        map.set(pid, `项目 ${pid}`);
+    Object.values(liveRowsByPhase || {}).forEach((rows) => {
+      (rows || []).forEach((r) => {
+        splitProjectIdTokens(r?.projectId).forEach((pid) => {
+          if (!pid || map.has(pid)) return;
+          map.set(pid, `项目 ${pid}`);
+        });
       });
     });
     return [
       { id: 'all', label: '全部项目' },
       ...Array.from(map.entries()).map(([id, label]) => ({ id, label })),
     ];
-  }, [deployLiveRows, projectNameOptions]);
-  const deployProjectOptions = useMemo(() => {
-    const map = new Map();
+  }, [liveRowsByPhase, projectNameOptions]);
+  const phaseProjectOptions = useMemo(() => {
     const nameMap = new Map();
     (projectNameOptions || []).forEach((p) => {
       const pid = String(p?.id ?? '').trim();
@@ -1967,19 +2045,25 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
       const pid = String(p?.id ?? '').trim();
       if (pid && !nameMap.has(pid)) nameMap.set(pid, p.name || `项目 ${pid}`);
     });
-    (deployLiveRows || []).forEach((r) => {
-      const successCnt = Number(r?.successCnt ?? 0);
-      if (!Number.isFinite(successCnt) || successCnt <= 0) return;
-      splitProjectIdTokens(r?.projectId).forEach((pid) => {
-        if (!pid || map.has(pid)) return;
-        map.set(pid, `${nameMap.get(pid) || `项目 ${pid}`} (${pid})`);
+
+    const optionsMap = {};
+    Object.entries(liveRowsByPhase || {}).forEach(([phaseId, rows]) => {
+      const map = new Map();
+      (rows || []).forEach((r) => {
+        const successCnt = Number(r?.successCnt ?? 0);
+        if (!Number.isFinite(successCnt) || successCnt <= 0) return;
+        splitProjectIdTokens(r?.projectId).forEach((pid) => {
+          if (!pid || map.has(pid)) return;
+          map.set(pid, `${nameMap.get(pid) || `项目 ${pid}`} (${pid})`);
+        });
       });
+      const list = Array.from(map.entries())
+        .map(([id, label]) => ({ id, label }))
+        .sort((a, b) => String(a.id).localeCompare(String(b.id), 'zh-CN'));
+      optionsMap[phaseId] = [{ id: 'all', label: '全部项目' }, ...list];
     });
-    const list = Array.from(map.entries())
-      .map(([id, label]) => ({ id, label }))
-      .sort((a, b) => String(a.id).localeCompare(String(b.id), 'zh-CN'));
-    return [{ id: 'all', label: '全部项目' }, ...list];
-  }, [deployLiveRows, projectNameOptions]);
+    return optionsMap;
+  }, [liveRowsByPhase, projectNameOptions]);
   const [phaseFilters, setPhaseFilters] = useState(() =>
     Object.fromEntries(
       phaseList.map((phase) => [
@@ -1995,6 +2079,84 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
   );
   const [expandedPhaseIds, setExpandedPhaseIds] = useState(() =>
     phaseList.length ? [phaseList[0].id] : [],
+  );
+
+  const [failureDetailModal, setFailureDetailModal] = useState({
+    open: false,
+    phaseId: null,
+    phaseTitle: '',
+    idcId: null,
+    loading: false,
+    error: null,
+    groups: [],
+    truncated: false,
+  });
+
+  const closeFailureDetailModal = useCallback(() => {
+    setFailureDetailModal({
+      open: false,
+      phaseId: null,
+      phaseTitle: '',
+      idcId: null,
+      loading: false,
+      error: null,
+      groups: [],
+      truncated: false,
+    });
+  }, []);
+
+  const loadFailureDetails = useCallback(
+    async (phaseId, idcIdOpt) => {
+      if (!useApi) return;
+      const cfg = getCloudLivePhaseConfig(phaseId);
+      if (!cfg) return;
+      const filter = phaseFilters[phaseId] || {
+        projectId: 'all',
+        gameSetId: 'all',
+        periodDays: '7',
+      };
+      const phaseMeta = phaseList.find((p) => p.id === phaseId);
+      setFailureDetailModal({
+        open: true,
+        phaseId,
+        phaseTitle: phaseMeta?.title ?? phaseId,
+        idcId: idcIdOpt || null,
+        loading: true,
+        error: null,
+        groups: [],
+        truncated: false,
+      });
+      try {
+        const sql = cloudTaskFailureDetailSql(CLOUD_TASK_FAILURE_DETAIL_SQL_TEMPLATE, {
+          periodDays: filter.periodDays,
+          pstage: cfg.pstage,
+          failStatus: cfg.failStatus,
+          projectId: filter.projectId,
+          idcId: idcIdOpt,
+        });
+        const ds = await queryMetabaseNative({
+          database: CLOUD_TASK_LIVE_DB_ID,
+          query: sql,
+          audience: SUPPLY_ENV_PAAS,
+        });
+        const raw = parseCloudTaskFailureDetailDataset(ds);
+        const groups = aggregateCloudTaskFailuresByPitem(raw);
+        setFailureDetailModal((m) => ({
+          ...m,
+          loading: false,
+          groups,
+          truncated: raw.length >= CLOUD_TASK_FAILURE_DETAIL_ROW_LIMIT,
+        }));
+      } catch (e) {
+        console.warn('[云化任务] 失败明细查询失败', e);
+        setFailureDetailModal((m) => ({
+          ...m,
+          loading: false,
+          error: e?.message || String(e),
+        }));
+      }
+    },
+    [phaseFilters, phaseList],
   );
 
   const updatePhaseFilter = useCallback((phaseId, key, value) => {
@@ -2048,7 +2210,7 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
         gameSetId: 'all',
         periodDays: '7',
       };
-      const isLiveDeploy = phase.id === 'deploy' && phase.dataSource === 'live';
+      const isLiveDeploy = phase.dataSource === 'live';
       const periodDays = Number(filter.periodDays || 7);
 
       if (isLiveDeploy) {
@@ -2363,12 +2525,16 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
     stageViews.reduce((sum, p) => sum + p.avgDuration * p.totalTasks, 0) / Math.max(globalTaskCount, 1);
   const globalSuccessRate =
     stageViews.reduce((sum, p) => sum + p.successRate * p.totalTasks, 0) / Math.max(globalTaskCount, 1);
-  const globalMaxDuration = Math.max(...stageViews.map((phase) => phase.maxDuration || 0));
-  const globalMinDuration = Math.min(
-    ...stageViews.map((phase) =>
-      Number.isFinite(phase.minDuration) && phase.minDuration > 0 ? phase.minDuration : Number.MAX_SAFE_INTEGER,
-    ),
-  );
+  const globalMaxDuration = stageViews.length
+    ? Math.max(...stageViews.map((phase) => phase.maxDuration || 0))
+    : 0;
+  const globalMinDuration = stageViews.length
+    ? Math.min(
+        ...stageViews.map((phase) =>
+          Number.isFinite(phase.minDuration) && phase.minDuration > 0 ? phase.minDuration : Number.MAX_SAFE_INTEGER,
+        ),
+      )
+    : 0;
 
   const globalTrend = useMemo(() => {
     const maxDays = stageViews.reduce(
@@ -2394,13 +2560,24 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
     return getDurationAxisMode(maxSec);
   }, [globalTrend]);
 
+  if (!stageViews.length) {
+    return (
+      <Card className="p-6">
+        <p className="text-sm text-[#4d4d4d]">
+          当前没有可展示的云化阶段数据（仅展示已接入并返回实时数据的阶段）。
+        </p>
+      </Card>
+    );
+  }
+
   return (
+    <>
     <div className="space-y-5">
       <Card className="p-5 sm:p-6">
         <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold flex items-center gap-2 text-[#171717]">
-              <Zap className="w-5 h-5 text-[#0a72ef]" /> 游戏云化任务指标看板（Mock）
+              <Zap className="w-5 h-5 text-[#0a72ef]" /> 游戏云化任务指标看板（实时）
             </h2>
             <p className="text-xs text-slate-600 mt-1">
               口径：仅统计已完成子任务，默认近 7 天，可按项目筛选。耗时单位：秒。
@@ -2482,6 +2659,11 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
           const phaseDurationAxisMode = getDurationAxisMode(
             Math.max(...(phase.trend || []).map((x) => Number(x?.avgDuration) || 0), 0),
           );
+          const phaseFailTotal = (phase.roomBreakdown || []).reduce(
+            (s, r) => s + Number(r.failCnt || 0),
+            0,
+          );
+          const showFailureDetail = useApi && phase.dataSource === 'live' && phaseFailTotal > 0;
           return (
           <Card key={phase.id} className="p-4 sm:p-5">
             <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
@@ -2489,27 +2671,38 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
                 <h3 className="text-base font-semibold text-[#171717]">{phase.title}</h3>
                 <p className="text-xs text-slate-600 mt-1">{phase.aliases}</p>
               </div>
-              <div className="flex items-start gap-4">
-                <div className="text-xs text-slate-600 leading-5">
+              <div className="flex flex-col items-stretch gap-2 sm:items-end">
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  {showFailureDetail && (
+                    <button
+                      type="button"
+                      onClick={() => loadFailureDetails(phase.id, null)}
+                      className="inline-flex items-center gap-1 rounded-md bg-white text-[#171717] border border-transparent px-3 py-1.5 text-xs font-medium shadow-[0_0_0_1px_rgba(0,0,0,0.08)] transition-colors hover:bg-slate-50"
+                    >
+                      失败明细（{phaseFailTotal.toLocaleString()}）
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => togglePhaseDetails(phase.id)}
+                    className="inline-flex items-center gap-1 rounded-md bg-white text-[#171717] border border-transparent px-3 py-1.5 text-xs font-medium shadow-[0_0_0_1px_rgba(0,0,0,0.08)] transition-colors hover:bg-slate-50"
+                  >
+                    {expandedPhaseIds.includes(phase.id) ? (
+                      <>
+                        收起详情 <ChevronUp className="w-4 h-4 ml-0.5" />
+                      </>
+                    ) : (
+                      <>
+                        展开详情 <ChevronDown className="w-4 h-4 ml-0.5" />
+                      </>
+                    )}
+                  </button>
+                </div>
+                <div className="text-xs text-slate-600 leading-5 text-right">
                   <div>统计维度：{phase.scope}</div>
                   <div>统计对象：{phase.object}</div>
                   <div>统计状态：{phase.statusScope}</div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => togglePhaseDetails(phase.id)}
-                  className="inline-flex items-center gap-1 rounded-md bg-white text-[#171717] border border-transparent px-3 py-1.5 text-xs font-medium shadow-[0_0_0_1px_rgba(0,0,0,0.08)] transition-colors hover:bg-slate-50"
-                >
-                  {expandedPhaseIds.includes(phase.id) ? (
-                    <>
-                      收起详情 <ChevronUp className="w-4 h-4 ml-0.5" />
-                    </>
-                  ) : (
-                    <>
-                      展开详情 <ChevronDown className="w-4 h-4 ml-0.5" />
-                    </>
-                  )}
-                </button>
               </div>
             </div>
 
@@ -2546,7 +2739,7 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
                       onChange={(e) => updatePhaseFilter(phase.id, 'projectId', e.target.value)}
                       className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700"
                     >
-                      {(phase.id === 'deploy' ? deployProjectOptions : cloudProjectOptions).map((opt) => (
+                      {(phaseProjectOptions[phase.id] || cloudProjectOptions).map((opt) => (
                         <option key={`project-${opt.id}`} value={opt.id}>
                           {opt.label}
                         </option>
@@ -2676,6 +2869,9 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
                         >
                           {renderSortLabel(phase.id, 'successRate', '成功率')}
                         </th>
+                        {showFailureDetail && (
+                          <th className="py-2 px-3 text-right font-medium text-slate-600">失败明细</th>
+                        )}
                       </tr>
                     </thead>
                     <tbody className="text-slate-700">
@@ -2690,6 +2886,21 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
                           <td className="py-2 px-3 text-right tabular-nums">{formatAdaptiveDuration(Number(row.maxDuration || 0), 1)}</td>
                           <td className="py-2 px-3 text-right tabular-nums">{formatAdaptiveDuration(Number(row.minDuration || 0), 1)}</td>
                           <td className="py-2 px-3 text-right tabular-nums text-[#0068d6]">{row.successRate.toFixed(2)}%</td>
+                          {showFailureDetail && (
+                            <td className="py-2 px-3 text-right whitespace-nowrap">
+                              {Number(row.failCnt || 0) > 0 ? (
+                                <button
+                                  type="button"
+                                  onClick={() => loadFailureDetails(phase.id, row.roomId)}
+                                  className="text-xs font-medium text-[#0068d6] hover:underline"
+                                >
+                                  查看
+                                </button>
+                              ) : (
+                                <span className="text-xs text-slate-300">—</span>
+                              )}
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -2702,6 +2913,76 @@ const CloudTaskView = ({ deployLiveRows = [], projectNameOptions = [] }) => {
         })}
       </div>
     </div>
+
+    {failureDetailModal.open && (
+      <div
+        className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/45"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cloud-failure-detail-title"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) closeFailureDetailModal();
+        }}
+      >
+        <div
+          className="relative flex w-full max-w-lg max-h-[min(85vh,560px)] flex-col overflow-hidden rounded-xl bg-white shadow-[0_0_0_1px_rgba(0,0,0,0.08),0_12px_40px_rgba(0,0,0,0.12)]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-4 py-3">
+            <h4 id="cloud-failure-detail-title" className="text-sm font-semibold leading-snug text-[#171717] pr-6">
+              失败任务明细
+              <span className="block mt-0.5 text-xs font-normal text-[#4d4d4d]">
+                {failureDetailModal.phaseTitle}
+                {failureDetailModal.idcId ? ` · 机房 ${failureDetailModal.idcId}` : ''}
+              </span>
+            </h4>
+            <button
+              type="button"
+              onClick={closeFailureDetailModal}
+              className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-[#171717]"
+              aria-label="关闭"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="min-h-[12rem] flex-1 overflow-y-auto px-4 py-3">
+            {failureDetailModal.loading && (
+              <div className="flex flex-col items-center justify-center gap-2 py-12 text-sm text-[#4d4d4d]">
+                <Loader2 className="h-8 w-8 animate-spin text-[#0a72ef]" aria-hidden />
+                正在查询大表…
+              </div>
+            )}
+            {!failureDetailModal.loading && failureDetailModal.error && (
+              <p className="text-sm text-red-600">{failureDetailModal.error}</p>
+            )}
+            {!failureDetailModal.loading && !failureDetailModal.error && failureDetailModal.groups.length === 0 && (
+              <p className="text-sm text-[#4d4d4d]">未查询到失败行（可能已被筛选条件过滤）。</p>
+            )}
+            {!failureDetailModal.loading && !failureDetailModal.error && failureDetailModal.groups.length > 0 && (
+              <ul className="space-y-4 text-sm text-[#171717]">
+                {failureDetailModal.groups.map((g) => (
+                  <li
+                    key={`fd-${failureDetailModal.phaseId}-${g.pitemId}`}
+                    className="rounded-lg border border-slate-100 bg-slate-50/50 px-3 py-2.5 shadow-[0_0_0_1px_rgba(0,0,0,0.03)]"
+                  >
+                    <div className="font-medium text-[#171717]">主任务ID：{g.pitemId}</div>
+                    <div className="mt-1.5 text-[#4d4d4d] break-words">
+                      VMID：{g.vmText || '—'}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {!failureDetailModal.loading && failureDetailModal.truncated && (
+              <p className="mt-3 text-xs text-amber-700">
+                命中行数达到上限（{CLOUD_TASK_FAILURE_DETAIL_ROW_LIMIT.toLocaleString()}），仅展示前若干条聚合结果；如需全量请缩小时间或项目范围。
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 };
 
@@ -3150,7 +3431,7 @@ export default function App() {
   const [ordersByProjectDatePaas, setOrdersByProjectDatePaas] = useState(undefined);
   const [ordersByProjectDateYuanli, setOrdersByProjectDateYuanli] = useState(undefined);
   const [supplyEnv, setSupplyEnv] = useState(SUPPLY_ENV_PAAS);
-  const [cloudDeployLiveRows, setCloudDeployLiveRows] = useState([]);
+  const [cloudTaskLiveRowsByPhase, setCloudTaskLiveRowsByPhase] = useState({});
   /** 企微映射更新后递增，驱动供应卡片按新 settlement→项目关系重算 */
   const [settlementMapEpoch, setSettlementMapEpoch] = useState(0);
   const supplyOrdersDatasetRef = useRef(null);
@@ -3162,40 +3443,53 @@ export default function App() {
 
   useEffect(() => {
     if (!useApi) {
-      setCloudDeployLiveRows([]);
+      setCloudTaskLiveRowsByPhase({});
       return;
     }
     let cancelled = false;
     (async () => {
       try {
-        const [durationDs, successDs] = await Promise.all([
-          queryMetabaseNative({
-            database: CLOUD_TASK_DEPLOY_DB_ID,
-            query: CLOUD_TASK_DEPLOY_DURATION_SQL,
-            audience: SUPPLY_ENV_PAAS,
+        const phasePairs = await Promise.all(
+          CLOUD_TASK_LIVE_PHASE_CONFIGS.map(async (cfg) => {
+            const [durationDs, successDs] = await Promise.all([
+              queryMetabaseNative({
+                database: CLOUD_TASK_LIVE_DB_ID,
+                query: cloudTaskSqlForStage(CLOUD_TASK_DURATION_SQL_TEMPLATE, cfg.pstage),
+                audience: SUPPLY_ENV_PAAS,
+              }),
+              queryMetabaseNative({
+                database: CLOUD_TASK_LIVE_DB_ID,
+                query: cloudTaskSuccessSql(CLOUD_TASK_SUCCESS_SQL_TEMPLATE, {
+                  pstage: cfg.pstage,
+                  successStatus: cfg.successStatus,
+                  failStatus: cfg.failStatus,
+                }),
+                audience: SUPPLY_ENV_PAAS,
+              }),
+            ]);
+            return [cfg.phaseId, durationDs, successDs];
           }),
-          queryMetabaseNative({
-            database: CLOUD_TASK_DEPLOY_DB_ID,
-            query: CLOUD_TASK_DEPLOY_SUCCESS_SQL,
-            audience: SUPPLY_ENV_PAAS,
-          }),
-        ]);
+        );
         if (cancelled) return;
-        const durationRows = parseCloudDeployDurationDataset(durationDs);
-        const successRows = parseCloudDeploySuccessDataset(successDs);
-        const merged = {};
-        durationRows.forEach((r) => {
-          const key = `${r.dt || ''}__${r.idcId}__${r.projectId}`;
-          merged[key] = { ...r };
+        const nextRows = {};
+        phasePairs.forEach(([phaseId, durationDs, successDs]) => {
+          const durationRows = parseCloudDeployDurationDataset(durationDs);
+          const successRows = parseCloudDeploySuccessDataset(successDs);
+          const merged = {};
+          durationRows.forEach((r) => {
+            const key = `${r.dt || ''}__${r.idcId}__${r.projectId}`;
+            merged[key] = { ...r };
+          });
+          successRows.forEach((r) => {
+            const key = `${r.dt || ''}__${r.idcId}__${r.projectId}`;
+            merged[key] = { ...(merged[key] || {}), ...r };
+          });
+          nextRows[phaseId] = Object.values(merged);
         });
-        successRows.forEach((r) => {
-          const key = `${r.dt || ''}__${r.idcId}__${r.projectId}`;
-          merged[key] = { ...(merged[key] || {}), ...r };
-        });
-        setCloudDeployLiveRows(Object.values(merged));
+        setCloudTaskLiveRowsByPhase(nextRows);
       } catch (e) {
-        console.warn('[云化任务-部署] 拉取实时数据失败，保留 mock 展示', e);
-        if (!cancelled) setCloudDeployLiveRows([]);
+        console.warn('[云化任务] 拉取实时数据失败', e);
+        if (!cancelled) setCloudTaskLiveRowsByPhase({});
       }
     })();
     return () => {
@@ -3897,7 +4191,7 @@ export default function App() {
                 {tabPanel === 'tasks' && (
                   <div role="tabpanel" id="tabpanel-tasks">
               <CloudTaskView
-                deployLiveRows={cloudDeployLiveRows}
+                liveRowsByPhase={cloudTaskLiveRowsByPhase}
                 projectNameOptions={instanceProjectOptions}
               />
                   </div>
